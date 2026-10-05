@@ -2717,6 +2717,46 @@ mod agent_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The real agent named by `ORBVANE_REAL_AGENT` continues a chat with a new process: one
+    /// message, the agent stopped (as when idle or reopened), then a question only the earlier
+    /// conversation answers. Uses the account: `ORBVANE_REAL_AGENT=claude-code cargo test -p app
+    /// real_agent_continues -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_agent_continues() {
+        let Ok(id) = std::env::var("ORBVANE_REAL_AGENT") else { return };
+        let (mut wb, dir) = workbench(&format!("real-resume-{id}"), &format!(r#"{{ "assistant.agent": "{id}" }}"#));
+        wb.assistant.send_file = false;
+        let mut r = None;
+        let answered = |wb: &Workbench, n: usize| {
+            let chat = wb.assistant.cur();
+            chat.phase == Phase::Ready && chat.entries.iter().filter(|e| matches!(e, Entry::User(_))).count() == n && matches!(chat.entries.last(), Some(Entry::Agent(_)) | Some(Entry::Notice(_)) | Some(Entry::Action(..)))
+        };
+        let wait = |wb: &mut Workbench, r: &mut Option<render::Renderer>, n: usize| {
+            let start = Instant::now();
+            while !answered(wb, n) && start.elapsed() < Duration::from_secs(180) {
+                std::thread::sleep(Duration::from_millis(50));
+                draw(wb, r);
+            }
+        };
+        type_and_send(&mut wb, "Remember the code word PELICAN-42. Reply with just: OK");
+        wait(&mut wb, &mut r, 1);
+        let session = wb.assistant.cur().session.clone();
+        eprintln!("first: {:?} (session {session:?})", wb.assistant.cur().entries.last());
+        wb.assistant.cur_mut().stop();
+        assert!(wb.assistant.cur().client.is_none() && wb.assistant.cur().session.is_some());
+        type_and_send(&mut wb, "What was the code word? Reply with just the word.");
+        wait(&mut wb, &mut r, 2);
+        let entries = wb.assistant.cur().entries.clone();
+        eprintln!("entries: {entries:#?}");
+        eprintln!("output: {:#?}", wb.output.lines("Assistant"));
+        assert_eq!(wb.assistant.cur().session, session, "the session changed");
+        assert!(!entries.iter().any(|e| matches!(e, Entry::Notice(n) if n.contains("new one"))), "it started a new conversation");
+        assert!(matches!(entries.last(), Some(Entry::Agent(t)) if t.contains("PELICAN-42")), "{:?}", entries.last());
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A custom command that isn't an agent (it exits at once): the transcript says so, quotes
     /// what it printed and offers the agents.
     #[test]
