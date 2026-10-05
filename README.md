@@ -119,7 +119,8 @@ save), semantic highlighting, inlay hints, code lenses and workspace symbols.
 
 **Built in, nothing to install:** our own servers for **JSON** (with schemas for the editor's own
 files, and `"$schema"`), **HTML** (with Format Document: inline content kept on one line, `<style>`
-formatted as CSS), and **CSS, SCSS and Less** (completion and hovers from browser
+formatted as CSS; JavaScript in `<script>` gets completion, hovers, signature help,
+go to definition and errors from the JavaScript server), and **CSS, SCSS and Less** (completion and hovers from browser
 data with MDN descriptions, lint warnings, colors, rename).
 
 Idle servers stop after 10 minutes to free memory and start again when needed

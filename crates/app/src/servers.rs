@@ -10,6 +10,8 @@ use lsp::{Client, Encoding, Incoming, State};
 use serde_json::{json, Value};
 use text::{Buffer, Pos};
 
+mod scripts;
+
 /// Language servers we know how to start. Each is used only if its binary is installed.
 fn server_for(lang: Lang) -> Option<&'static language::ServerDef> {
     lang.def().server.as_ref()
@@ -289,6 +291,9 @@ pub struct Servers {
     /// Initialization options the editor adds for its built-in servers (the JSON server's
     /// schemas), by command.
     builtin_options: HashMap<&'static str, Value>,
+    /// HTML files' JavaScript, as documents of their own (`scripts.rs`), and back.
+    embedded: HashMap<PathBuf, scripts::Embedded>,
+    host_of: HashMap<PathBuf, PathBuf>,
 }
 
 impl Servers {
@@ -314,6 +319,8 @@ impl Servers {
             lens_refresh: false,
             output: Vec::new(),
             builtin_options: HashMap::new(),
+            embedded: HashMap::new(),
+            host_of: HashMap::new(),
         }
     }
 
@@ -486,6 +493,7 @@ impl Servers {
     /// The files on screen: their servers aren't idle, and the ones whose files just went
     /// out of sight start counting from now.
     pub fn set_shown<'a>(&mut self, paths: impl IntoIterator<Item = &'a Path>) {
+        let paths: Vec<&Path> = paths.into_iter().flat_map(|p| [Some(p), self.script_doc(p)]).flatten().collect();
         let shown: HashSet<ServerKey> = paths.into_iter().filter_map(|p| self.docs.get(p)).map(|d| d.key.clone()).collect();
         let now = Instant::now();
         for key in self.shown.difference(&shown) {
@@ -514,6 +522,9 @@ impl Servers {
     fn stop(&mut self, key: &ServerKey, clear: bool) {
         let Some(client) = self.clients.remove(key) else { return };
         client.shutdown_in_background();
+        if clear {
+            self.drop_script_diagnostics(key);
+        }
         self.docs.retain(|_, d| d.key != *key);
         self.pending.retain(|(k, _), _| k != key);
         let prefix = format!("{}: ", key.0);
@@ -595,10 +606,14 @@ impl Servers {
     }
 
     /// The characters that open signature help, and the ones that update it while it's open.
+    /// (An HTML file's include its scripts' server's.)
     pub fn signature_triggers(&self, path: &Path) -> (Vec<String>, Vec<String>) {
-        let Some(c) = self.docs.get(path).and_then(|d| self.clients.get(&d.key)) else { return Default::default() };
+        let clients: Vec<&Client> = [Some(path), self.script_doc(path)].into_iter().flatten().filter_map(|p| self.docs.get(p)).filter_map(|d| self.clients.get(&d.key)).collect();
         let list = |key: &str| -> Vec<String> {
-            c.capabilities["signatureHelpProvider"][key].as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_string)).collect()).unwrap_or_default()
+            let all = clients.iter().filter_map(|c| c.capabilities["signatureHelpProvider"][key].as_array()).flatten();
+            let mut out: Vec<String> = all.filter_map(|v| v.as_str().map(str::to_string)).collect();
+            out.dedup();
+            out
         };
         (list("triggerCharacters"), list("retriggerCharacters"))
     }
@@ -614,6 +629,9 @@ impl Servers {
 
     /// Opens the document with its server, or sends its new contents if it changed.
     pub fn sync(&mut self, path: &Path, lang: Lang, buffer: &Buffer, root: &Path) {
+        if lang.id() == "html" {
+            self.sync_scripts(path, buffer, root);
+        }
         if self.docs.contains_key(path) {
             return self.send_changes(path, buffer);
         }
@@ -631,6 +649,7 @@ impl Servers {
     }
 
     pub fn close(&mut self, path: &Path) {
+        self.close_scripts(path);
         if let Some(doc) = self.docs.remove(path) {
             if let Some(client) = self.clients.get_mut(&doc.key) {
                 client.notify("textDocument/didClose", json!({ "textDocument": { "uri": lsp::path_to_uri(path) } }));
@@ -646,6 +665,11 @@ impl Servers {
 
     /// Whether the server for `path` offers `capability` (a key of its ServerCapabilities).
     pub fn supports(&self, path: &Path, capability: &str) -> bool {
+        let in_scripts = matches!(capability, "hoverProvider" | "completionProvider" | "signatureHelpProvider" | "definitionProvider" | "referencesProvider");
+        self.supports_here(path, capability) || in_scripts && self.script_doc(path).is_some_and(|s| self.supports_here(s, capability))
+    }
+
+    fn supports_here(&self, path: &Path, capability: &str) -> bool {
         self.docs.get(path).and_then(|d| self.clients.get(&d.key)).is_some_and(|c| {
             let v = &c.capabilities[capability];
             !v.is_null() && *v != Value::Bool(false)
@@ -901,6 +925,19 @@ impl Servers {
     }
 
     fn request(&mut self, path: &Path, method: &str, mut params: Value, buffer: &Buffer, pos: Pos, pending: Pending) {
+        // Inside an HTML file's script, the JavaScript server answers.
+        let path = &self.target(path, buffer, pos);
+        let capability = match method {
+            "textDocument/hover" => "hoverProvider",
+            "textDocument/completion" => "completionProvider",
+            "textDocument/signatureHelp" => "signatureHelpProvider",
+            "textDocument/definition" => "definitionProvider",
+            "textDocument/references" => "referencesProvider",
+            _ => "",
+        };
+        if !capability.is_empty() && self.script_doc(path).is_some() && !self.supports_here(path, capability) {
+            return;
+        }
         self.send_changes(path, buffer);
         self.touch(path);
         let Some(key) = self.docs.get(path).map(|d| d.key.clone()) else { return };
@@ -1006,6 +1043,7 @@ impl Servers {
         let mut events = Vec::new();
         let mut logs = Vec::new();
         let mut exited = Vec::new();
+        let mut merged = Vec::new();
         for (key, client) in &mut self.clients {
             let encoding = client.encoding;
             for msg in client.poll() {
@@ -1198,6 +1236,10 @@ impl Servers {
                     Incoming::Notification { method, params } => match method.as_str() {
                         "textDocument/publishDiagnostics" => {
                             if let Some((path, diags)) = lsp::parse_diagnostics(&params) {
+                                if self.host_of.contains_key(&path) || self.embedded.contains_key(&path) {
+                                    merged.push((key.clone(), encoding, path, diags));
+                                    continue;
+                                }
                                 self.published.push(path.clone());
                                 if diags.is_empty() {
                                     self.diagnostics.remove(&path);
@@ -1256,6 +1298,19 @@ impl Servers {
                         }
                     }
                     Incoming::Request { .. } => {}
+                }
+            }
+        }
+        for (key, encoding, path, diags) in merged {
+            self.publish_merged(&key, encoding, &path, diags);
+        }
+        // Places in an HTML file's scripts are places in the file.
+        for event in &mut events {
+            if let Event::Definition { locations, .. } | Event::References { locations, .. } = event {
+                for l in locations {
+                    if let Some(host) = self.host_of(&l.path) {
+                        l.path = host.to_path_buf();
+                    }
                 }
             }
         }

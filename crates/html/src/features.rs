@@ -333,6 +333,24 @@ pub fn auto_insert(doc: &Document, offset: usize, kind: &str) -> Option<String> 
     }
 }
 
+/// The byte ranges of the document's JavaScript: the contents of `<script>` elements without a
+/// `type`, or with a JavaScript or `module` type (templates, JSON and import maps are left out).
+pub fn scripts(doc: &Document) -> Vec<(usize, usize)> {
+    doc.tokens
+        .iter()
+        .filter(|t| t.kind == H::Script && t.start < t.end)
+        .filter(|t| {
+            let el = doc.elements.iter().filter(|e| e.tag.as_deref() == Some("script")).find(|e| e.start_tag_end == Some(t.start));
+            let ty = el.and_then(|e| e.attributes.iter().find(|a| a.name == "type")).and_then(|a| a.inner_value()).map(|(v, _)| v.trim().to_ascii_lowercase());
+            match ty.as_deref() {
+                None | Some("") | Some("module") => true,
+                Some(t) => matches!(t, "text/javascript" | "application/javascript" | "text/ecmascript" | "application/ecmascript" | "text/babel" | "text/jsx"),
+            }
+        })
+        .map(|t| (t.start, t.end))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,5 +409,13 @@ mod tests {
         assert_eq!(s[0].children[0].name, "div#x.a.b");
         let line_of = |o: usize| doc.text[..o].matches('\n').count();
         assert_eq!(folding(&doc, &line_of), [(0, 3), (1, 2), (5, 6)]);
+    }
+
+    #[test]
+    fn finds_the_scripts() {
+        let text = "<script>a()</script><script type=\"module\">b()</script><script type=\"text/template\"><p></script><script src=x.js></script>";
+        let doc = Document::parse(text);
+        let got: Vec<&str> = scripts(&doc).into_iter().map(|(a, b)| &text[a..b]).collect();
+        assert_eq!(got, ["a()", "b()"]);
     }
 }
