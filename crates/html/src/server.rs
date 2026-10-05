@@ -87,6 +87,7 @@ impl Service for HtmlService {
                 "documentSymbolProvider": true,
                 "foldingRangeProvider": true,
                 "colorProvider": true,
+                "documentFormattingProvider": true,
             },
             "serverInfo": { "name": "orbvane-html" },
         })
@@ -168,6 +169,18 @@ impl Service for HtmlService {
                 Value::Array(out)
             }
             "textDocument/colorPresentation" => Value::Array(css::server::color_presentations(&params["color"], params["range"].clone())),
+            "textDocument/formatting" => {
+                let options = &params["options"];
+                let size = options["tabSize"].as_u64().unwrap_or(4) as usize;
+                let tab = if options["insertSpaces"].as_bool().unwrap_or(true) { " ".repeat(size) } else { "\t".into() };
+                let eol = if doc.text.contains("\r\n") { "\r\n" } else { "\n" };
+                let formatted = crate::format::format(&doc.text, &tab, eol);
+                if formatted == doc.text {
+                    json!([])
+                } else {
+                    json!([{ "range": doc.range(0, doc.text.len()), "newText": formatted }])
+                }
+            }
             "html/autoInsert" => {
                 let kind = params["kind"].as_str().unwrap_or_default();
                 features::auto_insert(&html, offset(), kind).map_or(Value::Null, Value::String)
