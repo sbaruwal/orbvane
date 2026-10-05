@@ -9,6 +9,10 @@
 //!   (as diffs: the file now ↔ with Codex's patch applied), MCP tool calls, web searches and the
 //!   plan.
 //! - Its approval requests for commands and file changes become `session/request_permission`.
+//! - The session offers the account's models and the permission modes (`MODES`: an approval
+//!   policy and a sandbox, sent with every turn), switched with `session/set_model` and
+//!   `session/set_mode`. Its answer waits for the model list, which Codex sends after the thread
+//!   has started.
 //!
 //! Codex reads and writes files on disk itself (the editor saves before each message and
 //! reloads what changed). If the model Codex is configured with isn't one the account offers,
@@ -42,6 +46,24 @@ enum Event {
 impl From<Option<Value>> for Event {
     fn from(line: Option<Value>) -> Self {
         line.map_or(Event::CodexGone, Event::Codex)
+    }
+}
+
+/// The chat's permission modes: (our id, name, description).
+pub const MODES: [(&str, &str, &str); 4] = [
+    ("plan", "Read Only", "Reads and answers; changes nothing"),
+    ("ask", "Ask", "Asks before running commands and changing files"),
+    ("auto", "Auto", "Works in the folder without asking; asks before going outside it or online"),
+    ("full", "Full Access", "Edits and runs anything without asking, outside the sandbox"),
+];
+
+/// A mode's approval policy and sandbox, as `turn/start` takes them.
+fn policy(mode: &str) -> (Value, Value) {
+    match mode {
+        "plan" => (json!("on-request"), json!({ "type": "readOnly" })),
+        "auto" => (json!("on-request"), json!({ "type": "workspaceWrite" })),
+        "full" => (json!("never"), json!({ "type": "dangerFullAccess" })),
+        _ => (json!("untrusted"), json!({ "type": "workspaceWrite" })),
     }
 }
 
@@ -83,6 +105,15 @@ struct Bridge {
     model_override: Option<String>,
     /// The thread's configured model, until it's been checked against the account's.
     unchecked_model: Option<String>,
+    /// The model list arrived (or failed), and the thread's model.
+    models_known: bool,
+    thread_model: Option<String>,
+    /// The editor's `session/new` (or `session/load`) waiting for the model list.
+    waiting: Option<(Value, bool)>,
+    /// The permission mode (`MODES`).
+    mode: String,
+    /// What `check_model` has to say, once the session is answered.
+    model_notice: Option<String>,
     thread: Option<String>,
     turn: Option<String>,
     /// The editor's `session/prompt` waiting for the turn to end.
@@ -125,6 +156,11 @@ pub fn serve(options: Options, rx: Receiver<Value>, tx: Sender<Value>, log: Send
         default_model: None,
         model_override: None,
         unchecked_model: None,
+        models_known: false,
+        thread_model: None,
+        waiting: None,
+        mode: "ask".into(),
+        model_notice: None,
         thread: None,
         turn: None,
         prompt: None,
@@ -236,7 +272,8 @@ impl Bridge {
                     return self.reply_error(id, INTERNAL, "Codex is still answering the last message.");
                 };
                 let text = prompt_text(&params["prompt"]);
-                let mut turn = json!({ "threadId": thread, "input": [{ "type": "text", "text": text, "text_elements": [] }] });
+                let (approval, sandbox) = policy(&self.mode);
+                let mut turn = json!({ "threadId": thread, "input": [{ "type": "text", "text": text, "text_elements": [] }], "approvalPolicy": approval, "sandboxPolicy": sandbox });
                 if let Some(model) = &self.model_override {
                     turn["model"] = json!(model);
                 }
@@ -244,6 +281,21 @@ impl Bridge {
                 self.last_message = None;
                 self.codex_request("turn/start", turn, Pending::TurnStart);
             }
+            "session/set_mode" => match MODES.iter().find(|m| Some(m.0) == params["modeId"].as_str()) {
+                Some(m) => {
+                    self.mode = m.0.to_string();
+                    self.reply(id, json!({}));
+                    self.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": m.0 }));
+                }
+                None => self.reply_error(id, NOT_FOUND, "Codex has no such mode."),
+            },
+            "session/set_model" => match params["modelId"].as_str() {
+                Some(m) if self.models.iter().any(|(id, _)| id == m) => {
+                    self.model_override = Some(m.to_string());
+                    self.reply(id, json!({}));
+                }
+                _ => self.reply_error(id, NOT_FOUND, "This account doesn't offer that model."),
+            },
             "authenticate" => self.reply_error(id, INTERNAL, "Sign in to Codex from the agent menu (it runs `codex login`)."),
             _ => self.reply_error(id, NOT_FOUND, &format!("{method} isn't supported")),
         }
@@ -317,9 +369,16 @@ impl Bridge {
                     }
                 }
                 // The thread started before the list arrived.
+                self.models_known = true;
                 if let Some(model) = self.unchecked_model.take() {
                     self.check_model(&model);
                 }
+                self.answer_waiting();
+            }
+            (Pending::Models, Err(e)) => {
+                let _ = self.log.send(format!("Codex: no model list: {e}"));
+                self.models_known = true;
+                self.answer_waiting();
             }
             (Pending::Account, Ok(r)) => {
                 let needs = r["requiresOpenaiAuth"].as_bool().unwrap_or(false);
@@ -330,8 +389,12 @@ impl Bridge {
                     return self.reply_error(id, INTERNAL, "Codex didn't start a conversation.");
                 };
                 self.thread = Some(thread.to_string());
-                self.reply(id, if load { Value::Null } else { json!({ "sessionId": thread }) });
+                self.thread_model = r["model"].as_str().map(String::from);
                 self.check_model(r["model"].as_str().unwrap_or(""));
+                self.waiting = Some((id, load));
+                if self.models_known {
+                    self.answer_waiting();
+                }
             }
             (Pending::ThreadStart(id, _), Err(e)) => self.reply_error(id, INTERNAL, &friendly(&e)),
             (Pending::TurnStart, Ok(r)) => self.turn = r["turn"]["id"].as_str().map(String::from),
@@ -344,6 +407,26 @@ impl Bridge {
                 let _ = self.log.send(format!("Codex: {e}"));
             }
             _ => {}
+        }
+    }
+
+    /// Answers the editor's `session/new` (or `session/load`) once the thread and the model
+    /// list are both there: the session, its modes and models.
+    fn answer_waiting(&mut self) {
+        let (Some((id, load)), Some(thread)) = (self.waiting.take(), self.thread.clone()) else { return };
+        let modes: Vec<Value> = MODES.iter().map(|(id, name, about)| json!({ "id": id, "name": name, "description": about })).collect();
+        let mut info = json!({ "modes": { "currentModeId": self.mode, "availableModes": modes } });
+        if !self.models.is_empty() {
+            let models: Vec<Value> = self.models.iter().map(|(id, name)| json!({ "modelId": id, "name": name })).collect();
+            let current = self.model_override.clone().or_else(|| self.thread_model.clone()).or_else(|| self.default_model.clone());
+            info["models"] = json!({ "currentModelId": current, "availableModels": models });
+        }
+        if !load {
+            info["sessionId"] = json!(thread);
+        }
+        self.reply(id, info);
+        if let Some(text) = self.model_notice.take() {
+            self.update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": text } }));
         }
     }
 
@@ -363,8 +446,8 @@ impl Bridge {
         let Some(default) = self.default_model.clone() else { return };
         let name = self.models.iter().find(|(id, _)| *id == default).map_or(default.clone(), |(_, n)| n.clone());
         self.model_override = Some(default);
-        let text = format!("Codex is set to use the model {model}, which this account doesn't offer, so this chat uses {name}. (Codex's model is set in ~/.codex/config.toml.)");
-        self.update(json!({ "sessionUpdate": "agent_thought_chunk", "content": { "type": "text", "text": text } }));
+        // Said once the session is answered (the editor ignores updates before).
+        self.model_notice = Some(format!("Codex is set to use the model {model}, which this account doesn't offer, so this chat uses {name}. (Codex's model is set in ~/.codex/config.toml.)\n\n"));
     }
 
     fn codex_notification(&mut self, method: &str, p: &Value) {

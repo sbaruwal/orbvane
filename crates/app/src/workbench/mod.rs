@@ -379,6 +379,8 @@ enum Hit {
     AssistantAgentMenu,
     AssistantNewChat,
     AssistantHistory,
+    AssistantModeMenu,
+    AssistantModelMenu,
     /// A chat's tab, and its close button.
     AssistantTab(usize),
     AssistantTabClose(usize),
@@ -2311,6 +2313,8 @@ impl Workbench {
             Hit::AssistantChip => self.assistant.send_file = !self.assistant.send_file,
             Hit::AssistantNewChat => self.assistant_new_chat_menu(),
             Hit::AssistantHistory => self.assistant_toggle_history(),
+            Hit::AssistantModeMenu => self.assistant_mode_menu(),
+            Hit::AssistantModelMenu => self.assistant_model_menu(),
             Hit::AssistantTab(i) => self.select_chat(i),
             Hit::AssistantTabClose(i) => self.close_chat(i),
             Hit::AssistantHistoryRow(i) => self.open_saved_chat(i),

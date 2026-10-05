@@ -27,6 +27,11 @@ pub(super) struct Saved {
     pub meta: Meta,
     /// The agent's own session id, for `session/load`.
     pub session: Option<String>,
+    /// The permission mode and model chosen for it.
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
     pub entries: Vec<Entry>,
 }
 
@@ -80,6 +85,8 @@ mod tests {
         let chat = |id: &str, updated| Saved {
             meta: Meta { id: id.into(), title: format!("chat {id}"), agent: "codex".into(), created: 1, updated },
             session: Some("s".into()),
+            mode: None,
+            model: None,
             entries: vec![Entry::User("hi".into()), Entry::Agent("hello".into())],
         };
         save(&dir, &chat("a", 5));

@@ -5,8 +5,10 @@
 //! - `session/new` starts `claude` in the folder (with a session id of ours, so `session/load`
 //!   can reopen it later with `--resume`), with the editor's MCP servers
 //!   (`--mcp-config`), asking us before it uses a tool (`--permission-prompt-tool stdio`; the
-//!   permission mode is always `default`, whatever the user's settings say), and sends it the
-//!   control protocol's `initialize`. Each `session/prompt` is a user message, answered when
+//!   permission mode is the chat's, `default` to begin with, whatever the user's settings say),
+//!   and sends it the control protocol's `initialize`. Its answer lists the models; the session
+//!   offers them and the permission modes (`MODES`), switched with `session/set_mode` and
+//!   `session/set_model` (control requests). Leaving plan mode is a permission question too. Each `session/prompt` is a user message, answered when
 //!   the `result` for it arrives; `session/cancel` is an `interrupt` control request.
 //! - Its streamed events become session updates: text and thinking deltas; tool uses become
 //!   tool calls (titled by tool, with diffs for edits), their results end them; `TodoWrite` is
@@ -47,6 +49,21 @@ impl From<Option<Value>> for Event {
     }
 }
 
+/// The chat's permission modes: (our id, Claude Code's `--permission-mode`, name, description).
+pub const MODES: [(&str, &str, &str, &str); 5] = [
+    ("ask", "default", "Ask", "Asks before editing files and running commands"),
+    ("edits", "acceptEdits", "Accept Edits", "Edits files without asking; asks before running commands"),
+    ("auto", "auto", "Auto", "Claude Code decides which actions are safe to take without asking"),
+    ("plan", "plan", "Plan", "Reads and plans; changes nothing until you approve the plan"),
+    ("full", "bypassPermissions", "Full Access", "Edits and runs anything without asking"),
+];
+
+/// What a control request of ours changes once Claude Code accepts it.
+enum Setting {
+    Mode(String),
+    Model(String),
+}
+
 /// A `can_use_tool` request, now a permission question to the editor.
 struct Asked {
     request_id: Value,
@@ -81,9 +98,18 @@ struct Bridge {
     streamed: HashSet<String>,
     message: Option<String>,
     last_text: Option<String>,
-    /// Tool uses shown, by id: (tool name, its input), for their results.
+    /// Tools shown, by id: (tool name, its input), for their results.
     tools: HashMap<String, (String, Value)>,
     version: String,
+    /// The permission mode (`--permission-mode` values) and model (a value from `models`; None:
+    /// Claude Code's default).
+    mode: String,
+    model: Option<String>,
+    /// The models Claude Code offers: (value, name).
+    models: Vec<(String, String)>,
+    /// Our control requests waiting for their answer: request id → (the editor's request, if
+    /// it asked, and what it changes).
+    controls: HashMap<String, (Option<Value>, Setting)>,
 }
 
 /// Runs the bridge until the editor closes its end. See `Client::in_process`.
@@ -120,6 +146,10 @@ pub fn serve(options: Options, version: String, rx: Receiver<Value>, tx: Sender<
         last_text: None,
         tools: HashMap::new(),
         version,
+        mode: "default".into(),
+        model: None,
+        models: Vec::new(),
+        controls: HashMap::new(),
     };
     for event in inbox {
         match event {
@@ -169,10 +199,53 @@ impl Bridge {
         }
     }
 
-    fn control(&mut self, request: Value) {
+    fn control(&mut self, request: Value) -> String {
         self.next_control += 1;
         let id = format!("orbvane-{}", self.next_control);
-        self.claude_send(json!({ "type": "control_request", "request_id": id, "request": request }));
+        self.claude_send(json!({ "type": "control_request", "request_id": id.clone(), "request": request }));
+        id
+    }
+
+    /// What `session/new` (and `session/load`) answer besides the id: the modes and models.
+    fn session_info(&self) -> Value {
+        let current = MODES.iter().find(|m| m.1 == self.mode).map_or("ask", |m| m.0);
+        let modes: Vec<Value> = MODES.iter().map(|(id, _, name, about)| json!({ "id": id, "name": name, "description": about })).collect();
+        let mut info = json!({ "modes": { "currentModeId": current, "availableModes": modes } });
+        if !self.models.is_empty() {
+            let models: Vec<Value> = self.models.iter().map(|(id, name)| json!({ "modelId": id, "name": name })).collect();
+            info["models"] = json!({ "currentModelId": self.model.as_deref().unwrap_or("default"), "availableModels": models });
+        }
+        info
+    }
+
+    /// Changes the mode or model: at once while no `claude` runs (the next one starts with
+    /// it), else when Claude Code accepts it. `id`: the editor's request to answer.
+    fn change(&mut self, id: Option<Value>, setting: Setting) {
+        if self.claude.is_none() {
+            self.apply(setting);
+            if let Some(id) = id {
+                self.reply(id, json!({}));
+            }
+            return;
+        }
+        let request = match &setting {
+            Setting::Mode(m) => json!({ "subtype": "set_permission_mode", "mode": m }),
+            Setting::Model(m) => json!({ "subtype": "set_model", "model": m }),
+        };
+        let rid = self.control(request);
+        self.controls.insert(rid, (id, setting));
+    }
+
+    fn apply(&mut self, setting: Setting) {
+        match setting {
+            Setting::Mode(m) => {
+                self.mode = m;
+                if let Some((id, ..)) = MODES.iter().find(|x| x.1 == self.mode) {
+                    self.update(json!({ "sessionUpdate": "current_mode_update", "currentModeId": id }));
+                }
+            }
+            Setting::Model(m) => self.model = Some(m),
+        }
     }
 
     // ------------------------------------------------------------------ the editor
@@ -220,6 +293,14 @@ impl Bridge {
                 let message = json!({ "type": "user", "message": { "role": "user", "content": [{ "type": "text", "text": text }] }, "parent_tool_use_id": null, "session_id": "" });
                 self.claude_send(message);
             }
+            "session/set_mode" => match MODES.iter().find(|m| Some(m.0) == params["modeId"].as_str()) {
+                Some(m) => self.change(Some(id), Setting::Mode(m.1.to_string())),
+                None => self.reply_error(id, NOT_FOUND, "Claude Code has no such mode."),
+            },
+            "session/set_model" => match params["modelId"].as_str() {
+                Some(m) => self.change(Some(id), Setting::Model(m.to_string())),
+                None => self.reply_error(id, NOT_FOUND, "No model given."),
+            },
             "authenticate" => self.reply_error(id, INTERNAL, "Sign in to Claude Code from the agent menu (it runs `claude auth login`)."),
             _ => self.reply_error(id, NOT_FOUND, &format!("{method} isn't supported")),
         }
@@ -247,11 +328,15 @@ impl Bridge {
                 "--include-partial-messages",
                 "--permission-prompt-tool",
                 "stdio",
-                "--permission-mode",
-                "default",
+                // Full Access can be switched to (only switched to: the mode is the chat's).
+                "--allow-dangerously-skip-permissions",
             ]
             .map(String::from),
         );
+        args.extend(["--permission-mode".to_string(), self.mode.clone()]);
+        if let Some(model) = &self.model {
+            args.extend(["--model".to_string(), model.clone()]);
+        }
         if let Some(servers) = mcp_config(&params["mcpServers"]) {
             args.extend(["--mcp-config".to_string(), servers.to_string()]);
         }
@@ -291,11 +376,18 @@ impl Bridge {
             self.allowed.insert(asked.rule.clone());
         }
         let response = match option {
-            "allow" | "allow_always" => json!({ "behavior": "allow", "updatedInput": asked.input }),
+            "allow" | "allow_always" | "plan_edits" | "plan_ask" => json!({ "behavior": "allow", "updatedInput": asked.input }),
+            "reject" if asked.tool == "ExitPlanMode" => json!({ "behavior": "deny", "message": "The user wants to keep planning." }),
             "cancelled" => json!({ "behavior": "deny", "message": "The user stopped this.", "interrupt": true }),
             _ => json!({ "behavior": "deny", "message": format!("The user didn't allow {}.", asked.tool) }),
         };
         self.claude_send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": asked.request_id, "response": response } }));
+        // The plan approved: on in the mode picked.
+        match option {
+            "plan_edits" => self.change(None, Setting::Mode("acceptEdits".into())),
+            "plan_ask" => self.change(None, Setting::Mode("default".into())),
+            _ => {}
+        }
     }
 
     // ------------------------------------------------------------------ Claude Code
@@ -314,13 +406,39 @@ impl Bridge {
     fn from_claude(&mut self, msg: Value) {
         match msg["type"].as_str() {
             Some("control_response") => {
+                let ok = msg["response"]["subtype"].as_str() != Some("error");
+                let error = msg["response"]["error"].as_str().unwrap_or("Claude Code refused it.").to_string();
+                // A mode or model change.
+                if let Some((id, setting)) = msg["response"]["request_id"].as_str().and_then(|r| self.controls.remove(r)) {
+                    match (ok, id) {
+                        (true, id) => {
+                            self.apply(setting);
+                            if let Some(id) = id {
+                                self.reply(id, json!({}));
+                            }
+                        }
+                        (false, Some(id)) => self.reply_error(id, INTERNAL, &error),
+                        (false, None) => {
+                            let _ = self.log.send(format!("Claude Code: {error}"));
+                        }
+                    }
+                    return;
+                }
                 // The answer to `initialize` (others: interrupts) means the session is ready.
                 if let Some(id) = self.starting.take() {
-                    let ok = msg["response"]["subtype"].as_str() != Some("error");
+                    if ok && self.models.is_empty() {
+                        for m in msg["response"]["response"]["models"].as_array().into_iter().flatten() {
+                            let Some(value) = m["value"].as_str() else { continue };
+                            self.models.push((value.to_string(), m["displayName"].as_str().unwrap_or(value).to_string()));
+                        }
+                    }
                     match (ok, &self.session) {
-                        // session/load answers nothing.
-                        (true, Some(_)) if self.loading => self.reply(id, Value::Null),
-                        (true, Some(session)) => self.reply(id, json!({ "sessionId": session })),
+                        (true, Some(_)) if self.loading => self.reply(id, self.session_info()),
+                        (true, Some(session)) => {
+                            let mut info = self.session_info();
+                            info["sessionId"] = json!(session);
+                            self.reply(id, info);
+                        }
                         _ => {
                             let e = msg["response"]["error"].as_str().unwrap_or("Claude Code didn't start.");
                             self.reply_error(id, INTERNAL, e);
@@ -334,6 +452,10 @@ impl Bridge {
             Some("user") => self.tool_results(&msg["message"]["content"]),
             Some("result") => self.result(&msg),
             Some("system") => {
+                // Claude Code switched modes itself (leaving plan mode, say).
+                if let Some(mode) = msg["permissionMode"].as_str().filter(|m| *m != self.mode) {
+                    self.apply(Setting::Mode(mode.to_string()));
+                }
                 if msg["subtype"].as_str() == Some("api_retry") {
                     let _ = self.log.send(format!("Claude Code: retrying ({})", msg["error"].as_str().unwrap_or("")));
                 }
@@ -396,6 +518,11 @@ impl Bridge {
         if name == "TodoWrite" {
             return self.update(json!({ "sessionUpdate": "plan", "entries": plan_entries(&input) }));
         }
+        // Plan mode's plan: the reply's text (approving it is a permission question).
+        if name == "ExitPlanMode" {
+            let plan = input["plan"].as_str().unwrap_or("").to_string();
+            return self.agent_text(&id, &plan);
+        }
         let (title, kind) = describe(&name, &input);
         let mut update = json!({ "sessionUpdate": "tool_call", "toolCallId": id, "title": title, "kind": kind, "status": "in_progress" });
         let diffs = edit_diffs(&name, &input);
@@ -409,7 +536,7 @@ impl Bridge {
         for block in content.as_array().into_iter().flatten().filter(|b| b["type"].as_str() == Some("tool_result")) {
             let id = block["tool_use_id"].as_str().unwrap_or("").to_string();
             let Some((name, _)) = self.tools.get(&id).cloned() else { continue };
-            if name == "TodoWrite" {
+            if name == "TodoWrite" || name == "ExitPlanMode" {
                 continue;
             }
             let failed = block["is_error"].as_bool() == Some(true);
@@ -459,6 +586,9 @@ impl Bridge {
             return self.claude_send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } }));
         }
         let Some(session) = self.session.clone() else { return };
+        if tool == "ExitPlanMode" {
+            return self.ask_to_leave_plan_mode(request_id, input, &session);
+        }
         let (title, kind) = describe(&tool, &input);
         let call_id = r["tool_use_id"].as_str().map_or_else(|| format!("ask-{}", self.next_client_id + 1), String::from);
         let mut call = json!({ "toolCallId": call_id, "title": title, "kind": kind, "status": "pending" });
@@ -474,6 +604,20 @@ impl Bridge {
             { "optionId": "allow", "name": "Allow", "kind": "allow_once" },
             { "optionId": "allow_always", "name": for_chat, "kind": "allow_always" },
             { "optionId": "reject", "name": "Reject", "kind": "reject_once" },
+        ]);
+        self.client(json!({ "jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": { "sessionId": session, "toolCall": call, "options": options } }));
+    }
+
+    /// Plan mode's plan is ready: go on and make the changes (in which mode), or keep planning.
+    fn ask_to_leave_plan_mode(&mut self, request_id: Value, input: Value, session: &str) {
+        self.next_client_id += 1;
+        let id = self.next_client_id;
+        self.asked.insert(id, Asked { request_id, tool: "ExitPlanMode".into(), input, rule: String::new() });
+        let call = json!({ "toolCallId": format!("plan-{id}"), "title": "Start making the changes in the plan?", "kind": "think", "status": "pending" });
+        let options = json!([
+            { "optionId": "plan_edits", "name": "Yes, and Accept Edits", "kind": "allow_once" },
+            { "optionId": "plan_ask", "name": "Yes, and Ask Before Edits", "kind": "allow_once" },
+            { "optionId": "reject", "name": "No, Keep Planning", "kind": "reject_once" },
         ]);
         self.client(json!({ "jsonrpc": "2.0", "id": id, "method": "session/request_permission", "params": { "sessionId": session, "toolCall": call, "options": options } }));
     }

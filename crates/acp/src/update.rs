@@ -52,7 +52,9 @@ pub enum Update {
     Plan(Vec<PlanEntry>),
     /// Slash commands the agent offers: (name, description).
     Commands(Vec<(String, String)>),
-    /// Anything else (mode changes, usage...).
+    /// The agent switched to this mode (`current_mode_update`).
+    Mode(String),
+    /// Anything else (usage...).
     Other(String),
 }
 
@@ -114,8 +116,37 @@ pub fn parse(update: &Value) -> Update {
                 .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["description"].as_str().unwrap_or("").to_string())))
                 .collect(),
         ),
+        "current_mode_update" => Update::Mode(update["currentModeId"].as_str().unwrap_or("").to_string()),
         other => Update::Other(other.to_string()),
     }
+}
+
+/// A session's modes (`session/new`'s `modes`): the current one's id and (id, name,
+/// description) of each.
+pub fn modes(result: &Value) -> (Option<String>, Vec<(String, String, String)>) {
+    let m = &result["modes"];
+    let list = m["availableModes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| Some((o["id"].as_str()?.to_string(), o["name"].as_str()?.to_string(), o["description"].as_str().unwrap_or("").to_string())))
+        .collect();
+    (m["currentModeId"].as_str().map(String::from), list)
+}
+
+/// A session's models (`session/new`'s `models`): the current one's id and (id, name) of each.
+pub fn models(result: &Value) -> (Option<String>, Vec<(String, String)>) {
+    let m = &result["models"];
+    let list = m["availableModels"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|o| {
+            let id = o["modelId"].as_str()?.to_string();
+            Some((id.clone(), o["name"].as_str().map_or(id, String::from)))
+        })
+        .collect();
+    (m["currentModelId"].as_str().map(String::from), list)
 }
 
 /// A permission option: (id, name, kind: allow_once, allow_always, reject_once, reject_always).
@@ -137,6 +168,18 @@ pub fn permission_tool_call(params: &Value) -> ToolCall {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn reads_modes_and_models() {
+        let r = json!({
+            "modes": { "currentModeId": "ask", "availableModes": [{ "id": "ask", "name": "Ask", "description": "Asks" }, { "id": "auto", "name": "Auto" }] },
+            "models": { "currentModelId": "m1", "availableModels": [{ "modelId": "m1", "name": "One" }, { "modelId": "m2" }] },
+        });
+        assert_eq!(modes(&r), (Some("ask".into()), vec![("ask".into(), "Ask".into(), "Asks".into()), ("auto".into(), "Auto".into(), String::new())]));
+        assert_eq!(models(&r), (Some("m1".into()), vec![("m1".into(), "One".into()), ("m2".into(), "m2".into())]));
+        assert_eq!(modes(&json!(null)), (None, Vec::new()));
+        assert_eq!(parse(&json!({ "sessionUpdate": "current_mode_update", "currentModeId": "plan" })), Update::Mode("plan".into()));
+    }
 
     #[test]
     fn parses_updates() {

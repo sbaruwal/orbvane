@@ -772,6 +772,19 @@ fn builtin() -> Vec<Setting> {
                 description: "With Agent set to custom: the command line that starts an agent that speaks the Agent Client Protocol over its standard input and output. It runs through your login shell in the open folder.",
             },
             Setting {
+                key: "assistant.permissions",
+                default: "\"ask\"",
+                kind: Kind::Enum(&[
+                    ("ask", "Ask before editing files and running commands."),
+                    ("edits", "Edit files without asking; ask before running commands (Claude Code; Codex asks)."),
+                    ("auto", "Work in the folder without asking; ask before going outside it."),
+                    ("plan", "Read and plan only; change nothing (Codex: read only)."),
+                    ("full", "Edit and run anything without asking. Use only where that's safe."),
+                ]),
+                section: Section::Assistant,
+                description: "The permission mode new chats start in. Each chat can switch it from its header.",
+            },
+            Setting {
                 key: "assistant.saveBeforeSending",
                 default: "true",
                 kind: Kind::Bool,

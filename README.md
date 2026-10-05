@@ -231,7 +231,7 @@ show their message after the failing line, and Test Results has the output.
 <br>
 
 The Assistant (⇧⌘I) chats with coding agents working in the open folder. Pick the agent when you
-first open it, or later from the menu below the message box (or **Assistant: Select Agent**):
+first open it, or later from the chat's header (or **Assistant: Select Agent**):
 
 - **Claude Code** and **Codex:** Orbvane talks to their command line tools (`claude`, `codex`)
   directly, with no adapter to install. If one isn't installed or signed in, the Assistant offers
@@ -249,6 +249,19 @@ Chats:
   **Assistant: Show Chat History**) lists them; right-click a tab to rename, close or delete it.
 - Reopened later, a chat continues where it left off: the agent picks up its earlier
   conversation. An agent idle for 10 minutes stops, and starts again with the next message.
+
+Each chat's header shows its agent, permission mode and model, and switches them:
+
+| Mode | Claude Code | Codex |
+|---|---|---|
+| **Ask** | Asks before editing files and running commands | Asks before running commands and changing files |
+| **Accept Edits** | Edits without asking; asks before commands | (not offered) |
+| **Auto** | Claude Code decides which actions are safe without asking | Works in the folder without asking (in its sandbox); asks to go outside it or online |
+| **Plan** / **Read Only** | Plans first; you approve the plan before it changes anything | Reads and answers; changes nothing |
+| **Full Access** | Anything, without asking | Anything, without asking, outside the sandbox |
+
+New chats start in `assistant.permissions` (Ask unless you change it). Full Access asks you to
+confirm and shows a warning in the header.
 
 In a chat:
 
@@ -437,7 +450,8 @@ and formatting in them are kept when the editor changes them.
 | `files.hotExit` | Keep unsaved changes across quits |
 | `git.autofetch`, `git.confirmSync` | Background fetch, ask before sync |
 | `languageServers.stopWhenIdle` | Stop idle language servers |
-| `assistant.agent`, `assistant.agent.command` | The agent the Assistant talks to (or a custom command) |
+| `assistant.agent`, `assistant.agent.command` | The agent new chats talk to (or a custom command) |
+| `assistant.permissions` | The permission mode new chats start in |
 | `update.mode` | `default`, `manual` or `none` |
 
 Every setting is listed with its description in the Settings editor.

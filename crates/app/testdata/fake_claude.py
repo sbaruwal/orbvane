@@ -5,15 +5,16 @@ for the Assistant's Claude Code bridge test.
 Each message gets streamed thinking and text, a plan (TodoWrite), an Edit of the file the
 prompt mentions ("hello" → "goodbye") and a Bash command, both asked for with `can_use_tool`
 control requests, then a last message that didn't stream and the result. A message with
-"expired" fails the way an expired sign-in does; one with "wait" waits for an interrupt.
-It prints its arguments' checks and MCP servers on stderr.
+"expired" fails the way an expired sign-in does; one with "wait" waits for an interrupt;
+one with "make a plan" proposes a plan (`ExitPlanMode`). Mode and model changes are control
+requests. It prints its arguments' checks, MCP servers, modes and models on stderr.
 """
 import json
 import re
 import sys
 
 args = sys.argv[1:]
-need = ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default"]
+need = ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default", "--allow-dangerously-skip-permissions"]
 print("flags ok" if all(a in args for a in need) else "flags missing: %s" % args, file=sys.stderr, flush=True)
 if "--mcp-config" in args:
     servers = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]
@@ -53,6 +54,21 @@ def result(ok=True, text="", **extra):
     send(msg)
 
 
+def control(msg):
+    """The bridge's mode and model changes: True if it was one."""
+    if msg.get("type") != "control_request":
+        return False
+    r = msg["request"]
+    if r["subtype"] == "set_permission_mode":
+        print("mode: %s" % r["mode"], file=sys.stderr, flush=True)
+    elif r["subtype"] == "set_model":
+        print("model: %s" % r["model"], file=sys.stderr, flush=True)
+    else:
+        return False
+    send({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"]}})
+    return True
+
+
 def can_use(tool, tid, tool_input):
     """Asks to use a tool; True when allowed. Without an answer (allowed for the chat), the
     bridge answers at once, so this waits either way."""
@@ -62,6 +78,8 @@ def can_use(tool, tid, tool_input):
     send({"type": "control_request", "request_id": rid, "request": {"subtype": "can_use_tool", "tool_name": tool, "input": tool_input, "tool_use_id": tid}})
     while True:
         msg = read()
+        if control(msg):
+            continue
         if msg.get("type") == "control_response" and msg["response"]["request_id"] == rid:
             return msg["response"]["response"]["behavior"] == "allow"
 
@@ -70,6 +88,13 @@ def turn(text, n):
     if "expired" in text:
         assistant("e%d" % n, [{"type": "text", "text": "Failed to authenticate: OAuth session expired"}])
         result(True, "Failed to authenticate: OAuth session expired and could not be refreshed", is_error=True, terminal_reason="api_error")
+        return
+    if "make a plan" in text:
+        plan = {"plan": "1. Read it\n2. Change it"}
+        assistant("p%d" % n, [{"type": "tool_use", "id": "plan%d" % n, "name": "ExitPlanMode", "input": plan}])
+        approved = can_use("ExitPlanMode", "plan%d" % n, plan)
+        assistant("q%d" % n, [{"type": "text", "text": "Approved." if approved else "Still planning."}])
+        result(True, "")
         return
     if "wait" in text:
         while True:
@@ -117,8 +142,11 @@ print("fake claude ready", file=sys.stderr, flush=True)
 while True:
     msg = read()
     if msg.get("type") == "control_request" and msg["request"]["subtype"] == "initialize":
-        send({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"commands": []}}})
+        models = [{"value": "default", "displayName": "Default"}, {"value": "sonnet", "displayName": "Sonnet"}]
+        send({"type": "control_response", "response": {"subtype": "success", "request_id": msg["request_id"], "response": {"commands": [], "models": models}}})
         send({"type": "system", "subtype": "init", "session_id": session, "model": "test"})
+    elif control(msg):
+        pass
     elif msg.get("type") == "user":
         turns += 1
         text = " ".join(b.get("text", "") for b in msg["message"]["content"])

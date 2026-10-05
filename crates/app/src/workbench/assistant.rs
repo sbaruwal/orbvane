@@ -41,6 +41,8 @@ const PAD: f32 = 12.0;
 /// The chat tabs' row.
 const STRIP_H: f32 = 32.0;
 const HISTORY_ROW: f32 = 44.0;
+/// The chat's header: its agent, permission mode and model.
+const HEADER_H: f32 = 28.0;
 /// How many of the agent's last stderr lines an error quotes.
 const RECENT_LOG: usize = 4;
 /// An agent with nothing to do for this long stops (its chat continues where it was).
@@ -65,6 +67,9 @@ pub(crate) enum AgentAction {
     RenameChat(String),
     CloseChat(String),
     DeleteChat(String),
+    /// The shown chat's permission mode or model (ids the agent offers).
+    SetMode(String),
+    SetModel(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -170,6 +175,18 @@ pub(super) struct Chat {
     pub unread: bool,
     /// When the agent last did something (idle agents stop).
     last_active: Instant,
+    /// The permission mode and model chosen for it (ids the agent offers; None: the default),
+    /// applied whenever its agent starts.
+    pub mode: Option<String>,
+    pub model: Option<String>,
+    /// What the running agent offers, (id, name, description) and (id, name), and uses now.
+    modes: Vec<(String, String, String)>,
+    models: Vec<(String, String)>,
+    pub cur_mode: Option<String>,
+    cur_model: Option<String>,
+    /// `session/set_mode` and `session/set_model` waiting: (request, the id asked for).
+    mode_req: Option<(i64, String)>,
+    model_req: Option<(i64, String)>,
 }
 
 impl Chat {
@@ -202,6 +219,14 @@ impl Chat {
             recent_log: VecDeque::new(),
             unread: false,
             last_active: Instant::now(),
+            mode: None,
+            model: None,
+            modes: Vec::new(),
+            models: Vec::new(),
+            cur_mode: None,
+            cur_model: None,
+            mode_req: None,
+            model_req: None,
         }
     }
 
@@ -212,6 +237,8 @@ impl Chat {
         chat.created = s.meta.created;
         chat.updated = s.meta.updated;
         chat.session = s.session;
+        chat.mode = s.mode;
+        chat.model = s.model;
         chat.entries = s.entries;
         chat
     }
@@ -258,7 +285,7 @@ impl Chat {
             })
             .collect();
         let meta = Meta { id: self.id.clone(), title: self.label().to_string(), agent: self.agent.clone(), created: self.created, updated: self.updated };
-        Saved { meta, session: self.session.clone(), entries }
+        Saved { meta, session: self.session.clone(), mode: self.mode.clone(), model: self.model.clone(), entries }
     }
 
     /// Stops the agent; the session stays, to continue.
@@ -272,6 +299,10 @@ impl Chat {
         self.init_req = None;
         self.auth_req = None;
         self.loading = false;
+        self.mode_req = None;
+        self.model_req = None;
+        self.cur_mode = None;
+        self.cur_model = None;
     }
 
     fn notice(&mut self, text: impl Into<String>) {
@@ -307,6 +338,8 @@ pub(super) struct Assistant {
     /// Where the agent menu and the new chat menu open (below their buttons).
     menu_at: (f32, f32),
     new_menu_at: (f32, f32),
+    mode_menu_at: (f32, f32),
+    model_menu_at: (f32, f32),
     /// Tests: the shell command that stands in for a built-in agent's tool (`codex app-server`).
     pub server_override: Option<String>,
 }
@@ -331,6 +364,8 @@ impl Default for Assistant {
             tasks: HashMap::new(),
             menu_at: (0.0, 0.0),
             new_menu_at: (0.0, 0.0),
+            mode_menu_at: (0.0, 0.0),
+            model_menu_at: (0.0, 0.0),
             server_override: None,
         }
     }
@@ -800,7 +835,123 @@ impl Workbench {
                 }
             }
             AgentAction::DeleteChat(id) => self.delete_chat(&id),
+            AgentAction::SetMode(mode) => self.set_chat_mode(mode),
+            AgentAction::SetModel(model) => self.set_chat_model(model),
         }
+    }
+
+    // ------------------------------------------------------------------ modes and models
+
+    /// The permission modes chat `ci` offers: the running agent's, else what ours offer.
+    fn chat_modes(&self, ci: usize) -> Vec<(String, String, String)> {
+        let chat = &self.assistant.chats[ci];
+        if !chat.modes.is_empty() {
+            return chat.modes.clone();
+        }
+        let own = |v: &[(&str, &str, &str)]| v.iter().map(|(id, name, about)| (id.to_string(), name.to_string(), about.to_string())).collect();
+        match self.chat_choice(ci) {
+            Choice::Builtin(a) if a.id == "codex" => own(&acp::codex::MODES),
+            Choice::Builtin(_) => own(&acp::claude::MODES.map(|(id, _, name, about)| (id, name, about))),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The mode chat `ci` is in (or will start in), if its agent has modes.
+    fn chat_mode(&self, ci: usize) -> Option<(String, String, String)> {
+        let chat = &self.assistant.chats[ci];
+        let modes = self.chat_modes(ci);
+        let want = chat.mode.clone().or_else(|| chat.cur_mode.clone()).unwrap_or_else(|| self.settings.string("assistant.permissions"));
+        modes.iter().find(|m| m.0 == want).or_else(|| chat.cur_mode.as_ref().and_then(|c| modes.iter().find(|m| &m.0 == c))).cloned()
+    }
+
+    /// The agent just started a session: it gets the chat's mode (else the default one) and
+    /// model, if they're not what it uses.
+    fn apply_chat_settings(&mut self, ci: usize) {
+        let default = self.settings.string("assistant.permissions");
+        let chat = &mut self.assistant.chats[ci];
+        let want = chat.mode.clone().unwrap_or(default);
+        if chat.modes.iter().any(|m| m.0 == want) {
+            chat.mode = Some(want.clone());
+            if chat.cur_mode.as_deref() != Some(want.as_str()) {
+                if let (Some(c), Some(session)) = (&mut chat.client, &chat.session) {
+                    chat.mode_req = Some((c.request("session/set_mode", json!({ "sessionId": session, "modeId": want })), want));
+                }
+            }
+        }
+        if let Some(model) = chat.model.clone().filter(|m| chat.models.iter().any(|x| &x.0 == m) && chat.cur_model.as_deref() != Some(m.as_str())) {
+            if let (Some(c), Some(session)) = (&mut chat.client, &chat.session) {
+                chat.model_req = Some((c.request("session/set_model", json!({ "sessionId": session, "modelId": model })), model));
+            }
+        }
+    }
+
+    /// Switches the shown chat's permission mode (now, if its agent runs; else when it starts).
+    /// Full Access asks first.
+    fn set_chat_mode(&mut self, mode: String) {
+        let ci = self.assistant.active;
+        if mode == "full" && self.chat_mode(ci).is_none_or(|m| m.0 != "full") && !cfg!(test) {
+            let agent = self.chat_choice(ci).label();
+            let yes = self
+                .message_dialog()
+                .set_level(rfd::MessageLevel::Warning)
+                .set_title(format!("Give {agent} full access in this chat?"))
+                .set_description("It will edit files and run commands without asking, outside its sandbox. Use it only where that's safe.")
+                .set_buttons(rfd::MessageButtons::OkCancelCustom("Allow Full Access".into(), "Cancel".into()))
+                .show()
+                == rfd::MessageDialogResult::Custom("Allow Full Access".into());
+            if !yes {
+                return;
+            }
+        }
+        let chat = &mut self.assistant.chats[ci];
+        chat.mode = Some(mode.clone());
+        if chat.cur_mode.as_deref() != Some(mode.as_str()) && chat.session_req.is_none() {
+            if let (Some(c), Some(session)) = (&mut chat.client, &chat.session) {
+                chat.mode_req = Some((c.request("session/set_mode", json!({ "sessionId": session, "modeId": mode })), mode));
+            }
+        }
+        self.save_chat(ci);
+    }
+
+    fn set_chat_model(&mut self, model: String) {
+        let ci = self.assistant.active;
+        let chat = &mut self.assistant.chats[ci];
+        chat.model = Some(model.clone());
+        if chat.cur_model.as_deref() != Some(model.as_str()) && chat.session_req.is_none() {
+            if let (Some(c), Some(session)) = (&mut chat.client, &chat.session) {
+                chat.model_req = Some((c.request("session/set_model", json!({ "sessionId": session, "modelId": model })), model));
+            }
+        }
+        self.save_chat(ci);
+    }
+
+    /// The header's permission mode menu.
+    pub(super) fn assistant_mode_menu(&mut self) {
+        let ci = self.assistant.active;
+        let current = self.chat_mode(ci).map(|m| m.0);
+        let entries = self
+            .chat_modes(ci)
+            .into_iter()
+            .map(|(id, name, about)| {
+                let label = if about.is_empty() { name } else { format!("{name}: {about}") };
+                (PopupItem::Item { label, enabled: true, checked: Some(current.as_deref() == Some(id.as_str())) }, PopupAction::Agent(AgentAction::SetMode(id)))
+            })
+            .collect();
+        let (x, y) = self.assistant.mode_menu_at;
+        self.show_popup(entries, x, y);
+    }
+
+    /// The header's model menu (the agent's models are known once it runs).
+    pub(super) fn assistant_model_menu(&mut self) {
+        let chat = self.assistant.cur();
+        let current = chat.model.clone().or_else(|| chat.cur_model.clone());
+        let entries: Vec<(PopupItem, PopupAction)> = if chat.models.is_empty() {
+            vec![(PopupItem::Item { label: "The models show once the agent has started".into(), enabled: false, checked: None }, PopupAction::None)]
+        } else {
+            chat.models.iter().map(|(id, name)| (PopupItem::Item { label: name.clone(), enabled: true, checked: Some(current.as_deref() == Some(id.as_str())) }, PopupAction::Agent(AgentAction::SetModel(id.clone())))).collect()
+        };
+        let (x, y) = self.assistant.model_menu_at;
+        self.show_popup(entries, x, y);
     }
 
     /// The chat a newly chosen agent is for: the shown one if it hasn't started a conversation
@@ -1188,6 +1339,11 @@ impl Workbench {
                         chat.session = r["sessionId"].as_str().map(String::from);
                     }
                     chat.phase = Phase::Ready;
+                    (chat.cur_mode, chat.modes) = update::modes(&r);
+                    (chat.cur_model, chat.models) = update::models(&r);
+                    // The chat's mode and model before its message.
+                    self.apply_chat_settings(ci);
+                    let chat = &mut self.assistant.chats[ci];
                     if let Some(prompt) = chat.queued.take() {
                         self.send_prompt(ci, prompt);
                     }
@@ -1211,6 +1367,27 @@ impl Workbench {
                     }
                 }
             }
+        } else if chat.mode_req.as_ref().is_some_and(|r| r.0 == id) {
+            let (_, mode) = chat.mode_req.take().unwrap();
+            match result {
+                Ok(_) => chat.cur_mode = Some(mode),
+                Err((_, e)) => {
+                    chat.mode = chat.cur_mode.clone();
+                    let name = chat.modes.iter().find(|m| m.0 == mode).map_or(mode.clone(), |m| m.1.clone());
+                    chat.notice(format!("Couldn't switch to {name}: {e}"));
+                }
+            }
+            self.save_chat(ci);
+        } else if chat.model_req.as_ref().is_some_and(|r| r.0 == id) {
+            let (_, model) = chat.model_req.take().unwrap();
+            match result {
+                Ok(_) => chat.cur_model = Some(model),
+                Err((_, e)) => {
+                    chat.model = chat.cur_model.clone();
+                    chat.notice(format!("Couldn't switch to the model {model}: {e}"));
+                }
+            }
+            self.save_chat(ci);
         } else if Some(id) == chat.auth_req {
             chat.auth_req = None;
             match result {
@@ -1309,6 +1486,12 @@ impl Workbench {
                 Some(Entry::Plan(p)) => *p = plan,
                 _ => entries.push(Entry::Plan(plan)),
             },
+            // The agent switched (after a plan is approved, say).
+            Update::Mode(mode) => {
+                let chat = &mut self.assistant.chats[ci];
+                chat.cur_mode = Some(mode.clone());
+                chat.mode = Some(mode);
+            }
             Update::UserText(_) | Update::Commands(_) | Update::Other(_) => {}
         }
     }
@@ -1481,6 +1664,8 @@ impl Workbench {
         if self.chat_choice(self.assistant.active) == Choice::None && self.assistant.cur().entries.is_empty() {
             return self.draw_assistant_setup(c, r, fg, dim);
         }
+        let (header, r) = r.cut_top(HEADER_H);
+        self.draw_chat_header(c, header, fg, dim);
         let (body, footer) = r.cut_bottom(INPUT_H + 40.0);
         self.draw_transcript(c, body, fg, dim);
         self.draw_assistant_input(c, footer, fg, dim);
@@ -1557,6 +1742,56 @@ impl Workbench {
             }
             x += w + 4.0;
         }
+    }
+
+    /// The shown chat's agent, permission mode and model, each a menu.
+    fn draw_chat_header(&mut self, c: &mut Canvas, r: Rect, fg: Color, dim: Color) {
+        c.fill(Rect::new(r.x, r.bottom() - 1.0, r.w, 1.0), self.color("sideBarSectionHeader.border"));
+        let ci = self.assistant.active;
+        let y = r.y + (r.h - 20.0) / 2.0;
+        let mut x = r.x + PAD - 6.0;
+        let right = r.right() - PAD + 6.0;
+        let agent = self.chat_choice(ci).label();
+        let menu = self.header_menu(c, x, y, right, &agent, fg, Hit::AssistantAgentMenu);
+        self.assistant.menu_at = (menu.x, menu.bottom() + 2.0);
+        x = menu.right() + 2.0;
+        if let Some((id, name, _)) = self.chat_mode(ci) {
+            // Full Access stands out.
+            let full = id == "full";
+            let color = if full { self.color("editorWarning.foreground") } else { dim };
+            if full && x + 18.0 < right {
+                c.icon(&icons::WARNING, x + 4.0, y + 3.0, 14.0, color);
+                x += 18.0;
+            }
+            let menu = self.header_menu(c, x, y, right, &name, color, Hit::AssistantModeMenu);
+            self.assistant.mode_menu_at = (menu.x, menu.bottom() + 2.0);
+            x = menu.right() + 2.0;
+        }
+        let chat = self.assistant.cur();
+        let model = chat.model.clone().or_else(|| chat.cur_model.clone());
+        let name = match &model {
+            Some(m) => chat.models.iter().find(|x| &x.0 == m).map_or(m.clone(), |x| x.1.clone()),
+            None if chat.models.is_empty() => String::new(),
+            None => "Default model".into(),
+        };
+        if !name.is_empty() && x + 40.0 < right {
+            let menu = self.header_menu(c, x, y, right, &name, dim, Hit::AssistantModelMenu);
+            self.assistant.model_menu_at = (menu.x, menu.bottom() + 2.0);
+        }
+    }
+
+    /// A label with a chevron that opens a menu; returns where it was drawn.
+    fn header_menu(&mut self, c: &mut Canvas, x: f32, y: f32, right: f32, label: &str, color: Color, hit: Hit) -> Rect {
+        let st = TextStyle::ui(SMALL, color);
+        let w = (c.measure(label, &st) + 26.0).min((right - x).max(30.0));
+        let menu = Rect::new(x, y, w, 20.0);
+        if self.hovered(hit) {
+            c.fill_rounded(menu, self.color("toolbar.hoverBackground"), 5.0);
+        }
+        c.text_fit(Rect::new(menu.x + 6.0, menu.y, menu.w - 24.0, menu.h), label, &st);
+        c.icon(&icons::CHEVRON_DOWN, menu.right() - 17.0, menu.y + 4.0, 12.0, color);
+        self.hits.push((menu, hit));
+        menu
     }
 
     /// The chats kept for this folder, newest first.
@@ -1763,7 +1998,11 @@ impl Workbench {
             let extra = match e {
                 Entry::User(_) => 16.0,
                 Entry::Tool(t) => 10.0 + if t.content.iter().any(|c| matches!(c, ToolContent::Diff(_))) { 26.0 } else { 0.0 },
-                Entry::Permission(p) => 20.0 + 32.0 * p.options.len().div_ceil(2).max(1) as f32 + if p.diffs.is_empty() { 0.0 } else { 30.0 },
+                Entry::Permission(p) => {
+                    // Answered: one line instead of the buttons.
+                    let buttons = if p.answer.is_some() { 24.0 } else { 32.0 * p.options.len().div_ceil(2).max(1) as f32 };
+                    20.0 + buttons + if p.diffs.is_empty() { 0.0 } else { 30.0 }
+                }
                 Entry::Auth(m) => 20.0 + 32.0 * m.len() as f32,
                 Entry::Action(_, actions) => 20.0 + 32.0 * actions.len() as f32,
                 Entry::Plan(_) => 12.0,
@@ -1918,22 +2157,10 @@ impl Workbench {
     fn draw_assistant_input(&mut self, c: &mut Canvas, r: Rect, fg: Color, dim: Color) {
         c.fill(Rect::new(r.x, r.y, r.w, 1.0), self.color("sideBarSectionHeader.border"));
         let chip_y = r.y + 6.0;
-        // The chat's agent at the right.
-        let agent = self.chat_choice(self.assistant.active).label();
-        let st = TextStyle::ui(SMALL, dim);
-        let aw = (c.measure(&agent, &st) + 26.0).min(r.w * 0.5);
-        let menu = Rect::new(r.right() - PAD + 4.0 - aw, chip_y, aw, 20.0);
-        if self.hovered(Hit::AssistantAgentMenu) {
-            c.fill_rounded(menu, self.color("toolbar.hoverBackground"), 5.0);
-        }
-        c.text_fit(Rect::new(menu.x + 6.0, menu.y, menu.w - 24.0, menu.h), &agent, &st);
-        c.icon(&icons::CHEVRON_DOWN, menu.right() - 17.0, menu.y + 4.0, 12.0, dim);
-        self.assistant.menu_at = (menu.x, menu.bottom() + 2.0);
-        self.hits.push((menu, Hit::AssistantAgentMenu));
         // Context chips: the active file (click to leave it out of the next message).
         let file = self.active_doc().and_then(|d| d.buffer.path()).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
         let x = r.x + PAD;
-        let room = menu.x - 8.0 - x;
+        let room = r.right() - PAD - x;
         if let Some(file) = file.filter(|_| self.settings.bool("assistant.sendActiveFile") && room > 50.0) {
             let on = self.assistant.send_file;
             let st = TextStyle::ui(SMALL, if on { self.color("textLink.foreground") } else { dim });
@@ -2305,7 +2532,8 @@ mod agent_tests {
         let end = wb.docs[id].as_ref().unwrap().buffer.pos_of(11);
         wb.edit_doc(id, vec![(end, end, "!".into())], false);
         assert!(wb.docs[id].as_ref().unwrap().buffer.is_dirty());
-        let mut r = None;
+        // Drawn only for a snapshot.
+        let mut r = std::env::var_os("ORBVANE_ASSISTANT_SNAPSHOT").and_then(|_| render::Renderer::offscreen((1200, 760), 1.0).ok());
 
         type_and_send(&mut wb, "make it polite");
         // Saved first, since Codex reads the file from disk.
@@ -2329,11 +2557,23 @@ mod agent_tests {
         // The editor tools went to Codex's config.
         assert!(wb.output.lines("Assistant").iter().any(|l| l == "mcp servers: ['orbvane']"), "{:?}", wb.output.lines("Assistant"));
 
+        // The chat started in Ask; Auto and another model apply from the next message.
+        let log_has = |wb: &Workbench, line: &str| wb.output.lines("Assistant").iter().any(|l| l == line);
+        assert!(log_has(&wb, "turn: approval=untrusted sandbox=workspaceWrite model=m1"), "{:?}", wb.output.lines("Assistant"));
+        assert_eq!(wb.assistant.cur().cur_mode.as_deref(), Some("ask"));
+        assert_eq!(wb.assistant.cur().models.len(), 2);
+        wb.agent_action(AgentAction::SetMode("auto".into()));
+        wb.agent_action(AgentAction::SetModel("m2".into()));
+        until(&mut wb, &mut r, "the new mode and model", |wb| wb.assistant.cur().cur_mode.as_deref() == Some("auto") && wb.assistant.cur().cur_model.as_deref() == Some("m2"));
+        draw(&mut wb, &mut r);
+        snapshot(&wb, &r, "header");
+
         // A failed turn: Codex's own message.
         wb.assistant.send_file = false;
         type_and_send(&mut wb, "fail now");
         until(&mut wb, &mut r, "the failure", |wb| wb.assistant.cur().phase == Phase::Ready && matches!(wb.assistant.cur().entries.last(), Some(Entry::Notice(_))));
         assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Notice(n)) if n == "The agent reported an error: Model is unavailable."));
+        assert!(log_has(&wb, "turn: approval=on-request sandbox=workspaceWrite model=m2"), "{:?}", wb.output.lines("Assistant"));
 
         // Stop interrupts the turn.
         type_and_send(&mut wb, "wait for me");
@@ -2352,7 +2592,7 @@ mod agent_tests {
     /// command, a rejected edit, an expired sign-in offering Sign In, and Stop.
     #[test]
     fn a_conversation_with_claude_code() {
-        let (mut wb, dir) = workbench("claude", r#"{ "assistant.agent": "claude-code" }"#);
+        let (mut wb, dir) = workbench("claude", r#"{ "assistant.agent": "claude-code", "assistant.permissions": "edits" }"#);
         let file = dir.join("notes.txt");
         std::fs::write(&file, "hello world\n").unwrap();
         let fake = dir.join("fake_claude.py");
@@ -2388,6 +2628,9 @@ mod agent_tests {
         assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Agent(t)) if t == "Done."), "{:#?}", wb.assistant.cur().entries.last());
         let log = wb.output.lines("Assistant");
         assert!(log.iter().any(|l| l == "flags ok") && log.iter().any(|l| l == "mcp servers: ['orbvane']"), "{log:?}");
+        // New chats start in the default mode (here Accept Edits).
+        assert!(log.iter().any(|l| l == "mode: acceptEdits"), "{log:?}");
+        assert_eq!(wb.assistant.cur().cur_mode.as_deref(), Some("edits"));
 
         // Again: the edit is asked for (rejected this time), the command isn't.
         std::fs::write(&file, "hello again\n").unwrap();
@@ -2405,6 +2648,21 @@ mod agent_tests {
         type_and_send(&mut wb, "expired?");
         until(&mut wb, &mut r, "the sign-in prompt", |wb| wb.assistant.cur().phase == Phase::Ready && matches!(wb.assistant.cur().entries.last(), Some(Entry::Action(..))));
         assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Action(t, a)) if t.contains("sign-in has expired") && a[0].1 == AgentAction::SignIn("claude-code")));
+
+        // Plan mode and another model; approving the plan goes on in Accept Edits.
+        wb.agent_action(AgentAction::SetMode("plan".into()));
+        wb.agent_action(AgentAction::SetModel("sonnet".into()));
+        until(&mut wb, &mut r, "plan mode", |wb| wb.assistant.cur().cur_mode.as_deref() == Some("plan") && wb.assistant.cur().cur_model.as_deref() == Some("sonnet"));
+        assert!(wb.output.lines("Assistant").iter().any(|l| l == "model: sonnet"));
+        type_and_send(&mut wb, "make a plan");
+        until(&mut wb, &mut r, "the plan's question", |wb| question(wb, 4));
+        let p = last_question(&wb);
+        assert!(matches!(&wb.assistant.cur().entries[p], Entry::Permission(q) if q.title == "Start making the changes in the plan?" && q.options[0].1 == "Yes, and Accept Edits"));
+        assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Agent(t) if t.contains("1. Read it\n2. Change it"))));
+        wb.assistant_answer(p, 0);
+        until(&mut wb, &mut r, "the approved plan", |wb| wb.assistant.cur().phase == Phase::Ready && matches!(wb.assistant.cur().entries.last(), Some(Entry::Agent(t)) if t.ends_with("Approved.")));
+        assert_eq!(wb.assistant.cur().cur_mode.as_deref(), Some("edits"));
+        assert_eq!(wb.assistant.cur().mode.as_deref(), Some("edits"));
 
         // Stop interrupts it.
         type_and_send(&mut wb, "wait for me");

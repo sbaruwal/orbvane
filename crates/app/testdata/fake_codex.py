@@ -6,7 +6,8 @@ the plan, proposes a change to the file the prompt mentions (its first line, "he
 "goodbye"), asks for approval, applies it when accepted, runs a command, and ends the turn.
 A prompt with "fail" ends in an error; one with "wait" waits to be interrupted. Its threads
 start with a model the account doesn't offer, so the bridge picks the default; like the real
-one, it answers the model list after the thread has started.
+one, it answers the model list after the thread has started. Each turn's approval policy,
+sandbox and model are printed on stderr.
 """
 import json
 import re
@@ -50,6 +51,8 @@ def ask(method, params):
 def turn(rid, params):
     text = " ".join(i.get("text", "") for i in params["input"])
     model = params.get("model", "default")
+    sandbox = (params.get("sandboxPolicy") or {}).get("type")
+    print("turn: approval=%s sandbox=%s model=%s" % (params.get("approvalPolicy"), sandbox, model), file=sys.stderr, flush=True)
     turn_id = "u%d" % rid
     send({"id": rid, "result": {"turn": {"id": turn_id, "items": [], "status": "inProgress"}}})
     note("turn/started", {"threadId": thread, "turn": {"id": turn_id, "status": "inProgress"}})
