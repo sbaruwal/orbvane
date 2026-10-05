@@ -1,0 +1,65 @@
+{
+    "name": "todo-tree",
+    "displayName": "TODO Tree",
+    "description": "Finds TODO and FIXME comments in the workspace: a tree view, highlights, problems, hovers and completions.",
+    "version": "0.1.0",
+    "publisher": "orbvane",
+    "license": "MIT OR Apache-2.0",
+    "categories": ["Other"],
+    "engines": { "orbvane": "^0.1.0" },
+    "main": "../../../target/debug/todo-tree",
+    "activationEvents": ["onStartupFinished"],
+    "contributes": {
+        "viewsContainers": {
+            "activitybar": [
+                { "id": "todoTree", "title": "TODO Tree", "icon": "resources/todo.svg" }
+            ]
+        },
+        "views": {
+            "todoTree": [
+                { "id": "todoTree.todos", "name": "TODOs" },
+                { "id": "todoTree.tags", "name": "Tags" }
+            ],
+            "explorer": [
+                { "id": "todoTree.explorer", "name": "TODOs", "when": "config.todoTree.showInExplorer" }
+            ]
+        },
+        "commands": [
+            { "command": "todoTree.refresh", "title": "Refresh", "category": "TODO Tree", "icon": "$(refresh)" },
+            { "command": "todoTree.markDone", "title": "Mark as Done", "category": "TODO Tree", "icon": "$(check)" },
+            { "command": "todoTree.copy", "title": "Copy Text", "category": "TODO Tree" },
+            { "command": "todoTree.open", "title": "Open", "category": "TODO Tree" }
+        ],
+        "menus": {
+            "view/title": [
+                { "command": "todoTree.refresh", "when": "view == todoTree.todos || view == todoTree.explorer", "group": "navigation" }
+            ],
+            "view/item/context": [
+                { "command": "todoTree.markDone", "when": "viewItem == todo", "group": "inline" },
+                { "command": "todoTree.markDone", "when": "viewItem == todo" },
+                { "command": "todoTree.copy", "when": "viewItem == todo" }
+            ]
+        },
+        "configuration": {
+            "title": "TODO Tree",
+            "properties": {
+                "todoTree.tags": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": ["TODO", "FIXME"],
+                    "description": "The tags to look for."
+                },
+                "todoTree.showInExplorer": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show the TODOs in the Explorer too."
+                },
+                "todoTree.highlight": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Highlight tags in the editor."
+                }
+            }
+        }
+    }
+}

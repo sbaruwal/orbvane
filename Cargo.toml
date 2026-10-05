@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*", "examples/extensions/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+
+[workspace.dependencies]
+acp = { path = "crates/acp" }
+css = { path = "crates/css" }
+dap = { path = "crates/dap" }
+fswatch = { path = "crates/fswatch" }
+html = { path = "crates/html" }
+json = { path = "crates/json" }
+extensions = { path = "crates/extensions" }
+cargo-orbvane = { path = "crates/cargo-orbvane" }
+orbvane-extension = { path = "crates/extension-api" }
+jsdebug = { path = "crates/jsdebug" }
+language = { path = "crates/language" }
+lsp = { path = "crates/lsp" }
+render = { path = "crates/render" }
+scm = { path = "crates/scm" }
+search = { path = "crates/search" }
+settings = { path = "crates/settings" }
+terminal = { path = "crates/terminal" }
+text = { path = "crates/text" }
+theme = { path = "crates/theme" }
+
+winit = "0.30"
+wgpu = { version = "30", default-features = false, features = ["std", "metal", "wgsl"] }
+cosmic-text = "0.19"
+ropey = "1.6"
+muda = "0.20"
+rfd = "0.17"
+bytemuck = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+zeno = "0.3"
+arboard = "3"
+
+[profile.dev.package."*"]
+opt-level = 2

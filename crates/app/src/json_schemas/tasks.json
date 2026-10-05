@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "allowComments": true,
+  "allowTrailingCommas": true,
+  "properties": {
+    "version": { "enum": ["2.0.0"], "description": "The config's version number." },
+    "tasks": {
+      "type": "array",
+      "description": "The task configurations. Usually these are enrichments of task already defined in the external task runner.",
+      "items": {
+        "$ref": "#/definitions/task",
+        "defaultSnippets": [
+          { "label": "Shell task", "description": "A command line run in the shell.", "body": { "label": "${1:label}", "type": "shell", "command": "${2:command}" } },
+          { "label": "Process task", "description": "A program run directly, with arguments.", "body": { "label": "${1:label}", "type": "process", "command": "${2:program}", "args": [] } },
+          { "label": "Build task", "description": "The default build task (⇧⌘B).", "body": { "label": "${1:build}", "type": "shell", "command": "${2:make}", "group": { "kind": "build", "isDefault": true } } }
+        ]
+      }
+    }
+  },
+  "definitions": {
+    "taskCommand": {
+      "anyOf": [
+        { "type": "string" },
+        { "type": "object", "properties": { "value": { "type": "string", "description": "The actual command value." }, "quoting": { "enum": ["escape", "strong", "weak"] } }, "required": ["value"] }
+      ],
+      "description": "The command to be executed. Can be an external program or a shell command."
+    },
+    "taskOptions": {
+      "type": "object",
+      "description": "Additional command options",
+      "properties": {
+        "cwd": { "type": "string", "description": "The current working directory of the executed program or script. If omitted Code's current workspace root is used." },
+        "env": { "type": "object", "additionalProperties": { "type": "string" }, "description": "The environment of the executed program or shell. If omitted the parent process' environment is used." }
+      }
+    },
+    "taskFields": {
+      "properties": {
+        "label": { "type": "string", "description": "The task's user interface label" },
+        "type": { "enum": ["shell", "process", "cargo"], "enumDescriptions": ["The command is run in a shell.", "The command is run as a program, with its arguments.", "A Cargo subcommand (`command`), with its arguments."], "description": "Defines whether the task is run as a process or as a command inside a shell.", "default": "shell" },
+        "command": { "$ref": "#/definitions/taskCommand" },
+        "args": { "type": "array", "items": { "anyOf": [{ "type": "string" }, { "type": "object", "properties": { "value": { "type": "string" } } }] }, "description": "Arguments passed to the command when this task is invoked." },
+        "options": { "$ref": "#/definitions/taskOptions" },
+        "group": {
+          "anyOf": [
+            { "enum": ["build", "test", "none"], "enumDescriptions": ["Marks the task as a build task accessible through the 'Run Build Task' command.", "Marks the task as a test task accessible through the 'Run Test Task' command.", "Assigns the task to no group"] },
+            { "type": "object", "properties": { "kind": { "enum": ["build", "test", "none"], "description": "The task's execution group." }, "isDefault": { "type": "boolean", "description": "Defines if this task is the default task in the group." } } }
+          ],
+          "description": "Defines to which execution group this task belongs to. It supports \"build\" to add it to the build group and \"test\" to add it to the test group."
+        }
+      }
+    },
+    "task": {
+      "type": "object",
+      "allOf": [{ "$ref": "#/definitions/taskFields" }],
+      "properties": {
+        "osx": { "type": "object", "allOf": [{ "$ref": "#/definitions/taskFields" }], "description": "Mac specific command configuration" }
+      },
+      "required": ["command"]
+    }
+  }
+}

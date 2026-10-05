@@ -1,0 +1,12 @@
+[package]
+name = "orbvane-extension"
+description = "Write Orbvane extensions in Rust: the editor runs your program and talks to it over JSON-RPC"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "orbvane_extension"
+
+[dependencies]
+serde_json.workspace = true

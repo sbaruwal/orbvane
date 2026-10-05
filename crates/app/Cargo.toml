@@ -1,0 +1,38 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "orbvane"
+path = "src/main.rs"
+
+[dependencies]
+acp.workspace = true
+dap.workspace = true
+fswatch.workspace = true
+language.workspace = true
+lsp.workspace = true
+json.workspace = true
+css.workspace = true
+html.workspace = true
+jsdebug.workspace = true
+extensions.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+regex = "1"
+terminal.workspace = true
+search.workspace = true
+scm.workspace = true
+render.workspace = true
+text.workspace = true
+theme.workspace = true
+settings.workspace = true
+winit.workspace = true
+wgpu.workspace = true
+muda.workspace = true
+rfd.workspace = true
+arboard.workspace = true
+dispatch2 = "0.3"
+objc2 = "0.6"

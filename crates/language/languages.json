@@ -1,0 +1,391 @@
+[
+  {
+    "id": "rust", "name": "Rust", "aliases": ["rs"],
+    "extensions": [".rs"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "rust",
+    "keywords": ["as", "async", "await", "const", "crate", "dyn", "enum", "extern", "fn", "impl", "in", "let", "mod", "move", "mut", "pub", "ref", "self", "Self", "static", "struct", "super", "trait", "type", "unsafe", "use", "where", "true", "false"],
+    "controlKeywords": ["break", "continue", "else", "for", "if", "loop", "match", "return", "while", "yield"],
+    "constants": ["None", "Some", "Ok", "Err"],
+    "macros": true, "lifetimes": true,
+    "languageServer": { "command": "rust-analyzer", "heavy": true, "install": "rustup component add rust-analyzer" }
+  },
+  {
+    "id": "python", "name": "Python", "aliases": ["py"],
+    "extensions": [".py", ".pyi", ".pyw"],
+    "lineComment": "#",
+    "grammar": "python",
+    "keywords": ["and", "as", "async", "await", "class", "def", "del", "global", "in", "is", "lambda", "nonlocal", "not", "or", "True", "False", "None", "self"],
+    "controlKeywords": ["assert", "break", "continue", "elif", "else", "except", "finally", "for", "from", "if", "import", "pass", "raise", "return", "try", "while", "with", "yield"],
+    "tripleQuotedStrings": true,
+    "languageServer": { "command": "pyright-langserver", "install": "brew install pyright", "args": ["--stdio"] }
+  },
+  {
+    "id": "go", "name": "Go", "aliases": ["golang"],
+    "extensions": [".go"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "go",
+    "keywords": ["chan", "const", "func", "interface", "map", "package", "struct", "type", "var", "true", "false", "nil"],
+    "controlKeywords": ["break", "case", "continue", "default", "defer", "else", "fallthrough", "for", "go", "goto", "if", "import", "range", "return", "select", "switch"],
+    "languageServer": { "command": "gopls", "install": "brew install gopls" }
+  },
+  {
+    "id": "c", "name": "C",
+    "extensions": [".c", ".h"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "c",
+    "keywords": ["auto", "char", "const", "double", "enum", "extern", "float", "int", "long", "register", "short", "signed", "sizeof", "static", "struct", "typedef", "union", "unsigned", "void", "volatile", "NULL", "#include", "#define", "#ifdef", "#ifndef", "#endif", "#if", "#else", "#pragma"],
+    "controlKeywords": ["if", "else", "for", "while", "do", "return", "break", "continue", "switch", "case", "default", "goto"],
+    "languageServer": { "command": "clangd", "install": "xcode-select --install" }
+  },
+  {
+    "id": "cpp", "name": "C++", "aliases": ["c++"],
+    "extensions": [".cpp", ".cc", ".cxx", ".c++", ".hpp", ".hh", ".hxx", ".h++", ".ipp", ".inl"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "cpp",
+    "keywords": ["auto", "bool", "char", "class", "const", "constexpr", "delete", "double", "enum", "explicit", "extern", "float", "friend", "inline", "int", "long", "namespace", "new", "noexcept", "nullptr", "operator", "override", "private", "protected", "public", "short", "signed", "sizeof", "static", "struct", "template", "this", "typedef", "typename", "union", "unsigned", "using", "virtual", "void", "volatile", "true", "false", "#include", "#define", "#ifdef", "#ifndef", "#endif", "#if", "#else", "#pragma"],
+    "controlKeywords": ["if", "else", "for", "while", "do", "return", "break", "continue", "switch", "case", "default", "goto", "try", "catch", "throw"],
+    "languageServer": { "command": "clangd", "install": "xcode-select --install" }
+  },
+  {
+    "id": "javascript", "name": "JavaScript", "aliases": ["js"],
+    "extensions": [".js", ".mjs", ".cjs"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "javascript",
+    "keywords": ["async", "await", "class", "const", "delete", "extends", "function", "get", "in", "instanceof", "let", "new", "of", "set", "static", "super", "this", "typeof", "var", "void", "true", "false", "null", "undefined"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "export", "finally", "for", "from", "if", "import", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "typescript-language-server", "install": "brew install typescript-language-server", "args": ["--stdio"] }
+  },
+  {
+    "id": "typescript", "name": "TypeScript", "aliases": ["ts"],
+    "extensions": [".ts", ".mts", ".cts"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "typescript",
+    "keywords": ["abstract", "any", "as", "async", "await", "boolean", "class", "const", "declare", "delete", "enum", "extends", "function", "get", "implements", "in", "instanceof", "interface", "keyof", "let", "namespace", "new", "number", "of", "private", "protected", "public", "readonly", "set", "static", "string", "super", "this", "type", "typeof", "var", "void", "true", "false", "null", "undefined"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "export", "finally", "for", "from", "if", "import", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "typescript-language-server", "install": "brew install typescript-language-server", "args": ["--stdio"] }
+  },
+  {
+    "id": "toml", "name": "TOML",
+    "extensions": [".toml"], "filenames": ["Cargo.lock", "Pipfile"],
+    "lineComment": "#",
+    "grammar": "toml",
+    "constants": ["true", "false"],
+    "languageServer": { "command": "taplo", "install": "brew install taplo", "args": ["lsp", "stdio"] }
+  },
+  {
+    "id": "json", "name": "JSON",
+    "extensions": [".json", ".webmanifest", ".har"], "filenames": [".prettierrc", ".babelrc"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "json",
+    "constants": ["true", "false", "null"],
+    "languageServer": { "command": "builtin:json" }
+  },
+  {
+    "id": "markdown", "name": "Markdown", "aliases": ["md"],
+    "extensions": [".md", ".markdown", ".mdown", ".mkd", ".mdx"],
+    "blockComment": ["<!--", "-->"],
+    "grammar": "markdown"
+  },
+  {
+    "id": "shellscript", "name": "Shell Script", "aliases": ["shell", "sh", "bash", "zsh"],
+    "extensions": [".sh", ".bash", ".zsh", ".ksh"],
+    "filenames": [".bashrc", ".bash_profile", ".bash_login", ".profile", ".zshrc", ".zprofile", ".zshenv", ".zlogin"],
+    "lineComment": "#",
+    "grammar": "bash",
+    "keywords": ["export", "local", "function", "readonly", "declare", "alias", "source"],
+    "controlKeywords": ["if", "then", "else", "elif", "fi", "for", "while", "until", "do", "done", "case", "esac", "in", "return", "exit"],
+    "languageServer": { "command": "bash-language-server", "install": "brew install bash-language-server", "args": ["start"] }
+  },
+  {
+    "id": "search-result", "name": "Search Result",
+    "extensions": [".code-search"]
+  },
+  {
+    "id": "plaintext", "name": "Plain Text", "aliases": ["text"],
+    "extensions": [".txt"]
+  },
+  {
+    "id": "javascriptreact", "name": "JavaScript JSX", "aliases": ["jsx"],
+    "extensions": [".jsx"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "javascript",
+    "keywords": ["async", "await", "class", "const", "delete", "extends", "function", "get", "in", "instanceof", "let", "new", "of", "set", "static", "super", "this", "typeof", "var", "void", "true", "false", "null", "undefined"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "export", "finally", "for", "from", "if", "import", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "typescript-language-server", "install": "brew install typescript-language-server", "args": ["--stdio"] }
+  },
+  {
+    "id": "typescriptreact", "name": "TypeScript JSX", "aliases": ["tsx"],
+    "extensions": [".tsx"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "tsx",
+    "keywords": ["abstract", "any", "as", "async", "await", "boolean", "class", "const", "declare", "delete", "enum", "extends", "function", "get", "implements", "in", "instanceof", "interface", "keyof", "let", "namespace", "new", "number", "of", "private", "protected", "public", "readonly", "set", "static", "string", "super", "this", "type", "typeof", "var", "void", "true", "false", "null", "undefined"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "export", "finally", "for", "from", "if", "import", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "typescript-language-server", "install": "brew install typescript-language-server", "args": ["--stdio"] }
+  },
+  {
+    "id": "jsonc", "name": "JSON with Comments",
+    "extensions": [".jsonc", ".code-workspace", ".code-snippets"],
+    "filenames": ["tsconfig.json", "jsconfig.json", ".eslintrc.json", "settings.json", "launch.json", "tasks.json", "keybindings.json", "extensions.json", "languages.json"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "json",
+    "constants": ["true", "false", "null"],
+    "languageServer": { "command": "builtin:json" }
+  },
+  {
+    "id": "html", "name": "HTML", "aliases": ["htm", "xhtml"],
+    "extensions": [".html", ".htm", ".shtml", ".xhtml"],
+    "blockComment": ["<!--", "-->"],
+    "grammar": "html",
+    "languageServer": { "command": "builtin:html" }
+  },
+  {
+    "id": "css", "name": "CSS",
+    "extensions": [".css"],
+    "blockComment": ["/*", "*/"],
+    "grammar": "css",
+    "keywords": ["!important"],
+    "languageServer": { "command": "builtin:css" }
+  },
+  {
+    "id": "scss", "name": "SCSS",
+    "extensions": [".scss"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "scss",
+    "keywords": ["@mixin", "@include", "@extend", "@use", "@forward", "@function", "@return", "@import", "!default", "!important"],
+    "controlKeywords": ["@if", "@else", "@each", "@for", "@while"],
+    "languageServer": { "command": "builtin:css" }
+  },
+  {
+    "id": "less", "name": "Less",
+    "extensions": [".less"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "css",
+    "keywords": ["!important"],
+    "languageServer": { "command": "builtin:css" }
+  },
+  {
+    "id": "xml", "name": "XML",
+    "extensions": [".xml", ".xsd", ".xsl", ".xslt", ".svg", ".plist", ".csproj", ".xaml", ".storyboard", ".xib", ".entitlements"],
+    "blockComment": ["<!--", "-->"],
+    "grammar": "xml"
+  },
+  {
+    "id": "yaml", "name": "YAML", "aliases": ["yml"],
+    "extensions": [".yml", ".yaml"],
+    "lineComment": "#",
+    "grammar": "yaml",
+    "constants": ["true", "false", "null", "yes", "no", "on", "off"],
+    "languageServer": { "command": "yaml-language-server", "install": "brew install yaml-language-server", "args": ["--stdio"] }
+  },
+  {
+    "id": "java", "name": "Java",
+    "extensions": [".java", ".jav"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "java",
+    "keywords": ["abstract", "boolean", "byte", "char", "class", "double", "enum", "extends", "final", "float", "implements", "import", "instanceof", "int", "interface", "long", "native", "new", "package", "private", "protected", "public", "record", "short", "static", "super", "synchronized", "this", "transient", "var", "void", "volatile", "true", "false", "null"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "finally", "for", "if", "return", "switch", "throw", "throws", "try", "while", "yield"],
+    "languageServer": { "command": "jdtls", "heavy": true, "install": "brew install jdtls" }
+  },
+  {
+    "id": "csharp", "name": "C#", "aliases": ["cs"],
+    "extensions": [".cs", ".csx"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "c_sharp",
+    "keywords": ["abstract", "as", "async", "await", "base", "bool", "byte", "char", "class", "const", "decimal", "delegate", "double", "enum", "event", "explicit", "extern", "float", "get", "implicit", "in", "int", "interface", "internal", "is", "long", "namespace", "new", "object", "operator", "out", "override", "params", "private", "protected", "public", "readonly", "record", "ref", "sealed", "set", "short", "static", "string", "struct", "this", "typeof", "uint", "ulong", "using", "var", "virtual", "void", "true", "false", "null"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "finally", "for", "foreach", "goto", "if", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "csharp-ls", "install": "dotnet tool install --global csharp-ls" }
+  },
+  {
+    "id": "ruby", "name": "Ruby", "aliases": ["rb"],
+    "extensions": [".rb", ".rake", ".gemspec", ".ru", ".erb"],
+    "filenames": ["Gemfile", "Rakefile", "Podfile", "Fastfile", "Brewfile", "Vagrantfile"],
+    "lineComment": "#", "blockComment": ["=begin", "=end"],
+    "grammar": "ruby",
+    "keywords": ["alias", "and", "class", "def", "defined?", "do", "end", "in", "module", "not", "or", "self", "super", "attr_accessor", "attr_reader", "attr_writer", "require", "require_relative", "true", "false", "nil"],
+    "controlKeywords": ["begin", "break", "case", "else", "elsif", "ensure", "for", "if", "next", "redo", "rescue", "retry", "return", "then", "unless", "until", "when", "while", "yield"],
+    "languageServer": { "command": "ruby-lsp", "install": "gem install ruby-lsp" }
+  },
+  {
+    "id": "swift", "name": "Swift",
+    "extensions": [".swift"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "swift",
+    "keywords": ["actor", "as", "associatedtype", "async", "await", "class", "deinit", "enum", "extension", "fileprivate", "func", "import", "init", "inout", "internal", "is", "let", "mutating", "open", "operator", "override", "private", "protocol", "public", "some", "any", "static", "struct", "subscript", "super", "self", "Self", "typealias", "var", "weak", "true", "false", "nil"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "defer", "do", "else", "fallthrough", "for", "guard", "if", "in", "repeat", "return", "switch", "throw", "throws", "try", "where", "while"],
+    "languageServer": { "command": "sourcekit-lsp", "install": "xcode-select --install" }
+  },
+  {
+    "id": "objective-c", "name": "Objective-C", "aliases": ["objc"],
+    "extensions": [".m"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "objc",
+    "keywords": ["@interface", "@implementation", "@end", "@property", "@protocol", "@class", "@selector", "@synthesize", "self", "super", "id", "nil", "YES", "NO", "void", "int", "char", "const", "static", "struct", "typedef", "#import", "#include", "#define"],
+    "controlKeywords": ["if", "else", "for", "while", "do", "return", "break", "continue", "switch", "case", "default", "@try", "@catch", "@finally"],
+    "languageServer": { "command": "clangd", "install": "xcode-select --install" }
+  },
+  {
+    "id": "objective-cpp", "name": "Objective-C++",
+    "extensions": [".mm"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "objc",
+    "keywords": ["@interface", "@implementation", "@end", "@property", "@protocol", "@class", "class", "namespace", "template", "self", "super", "nil", "YES", "NO", "void", "int", "const", "static", "#import", "#include"],
+    "controlKeywords": ["if", "else", "for", "while", "do", "return", "break", "continue", "switch", "case", "default"],
+    "languageServer": { "command": "clangd", "install": "xcode-select --install" }
+  },
+  {
+    "id": "lua", "name": "Lua",
+    "extensions": [".lua"],
+    "lineComment": "--", "blockComment": ["--[[", "]]"],
+    "grammar": "lua",
+    "keywords": ["and", "function", "local", "not", "or", "self", "true", "false", "nil"],
+    "controlKeywords": ["break", "do", "else", "elseif", "end", "for", "goto", "if", "in", "repeat", "return", "then", "until", "while"],
+    "languageServer": { "command": "lua-language-server", "install": "brew install lua-language-server" }
+  },
+  {
+    "id": "sql", "name": "SQL",
+    "extensions": [".sql", ".dsql"],
+    "lineComment": "--", "blockComment": ["/*", "*/"],
+    "grammar": "sql",
+    "keywords": ["SELECT", "FROM", "WHERE", "INSERT", "INTO", "VALUES", "UPDATE", "SET", "DELETE", "CREATE", "TABLE", "INDEX", "VIEW", "DROP", "ALTER", "ADD", "JOIN", "LEFT", "RIGHT", "INNER", "OUTER", "ON", "AS", "AND", "OR", "NOT", "IN", "IS", "LIKE", "ORDER", "BY", "GROUP", "HAVING", "LIMIT", "OFFSET", "DISTINCT", "UNION", "PRIMARY", "KEY", "FOREIGN", "REFERENCES", "DEFAULT",
+      "select", "from", "where", "insert", "into", "values", "update", "set", "delete", "create", "table", "index", "view", "drop", "alter", "add", "join", "left", "right", "inner", "outer", "on", "as", "and", "or", "not", "in", "is", "like", "order", "by", "group", "having", "limit", "offset", "distinct", "union", "primary", "key", "foreign", "references", "default"],
+    "constants": ["NULL", "TRUE", "FALSE", "null", "true", "false"]
+  },
+  {
+    "id": "dockerfile", "name": "Dockerfile", "aliases": ["docker"],
+    "extensions": [".dockerfile", ".containerfile"],
+    "filenames": ["Dockerfile", "Containerfile"],
+    "lineComment": "#",
+    "grammar": "dockerfile",
+    "keywords": ["FROM", "AS", "RUN", "CMD", "LABEL", "EXPOSE", "ENV", "ADD", "COPY", "ENTRYPOINT", "VOLUME", "USER", "WORKDIR", "ARG", "ONBUILD", "STOPSIGNAL", "HEALTHCHECK", "SHELL"],
+    "languageServer": { "command": "docker-langserver", "install": "npm install -g dockerfile-language-server-nodejs", "args": ["--stdio"] }
+  },
+  {
+    "id": "makefile", "name": "Makefile", "aliases": ["make"],
+    "extensions": [".mk", ".mak"],
+    "filenames": ["Makefile", "makefile", "GNUmakefile", "OCamlMakefile"],
+    "lineComment": "#",
+    "grammar": "make",
+    "keywords": ["include", "define", "endef", "export", "unexport", "override", "private", "vpath", ".PHONY"],
+    "controlKeywords": ["ifeq", "ifneq", "ifdef", "ifndef", "else", "endif"]
+  },
+  {
+    "id": "php", "name": "PHP",
+    "extensions": [".php", ".phtml", ".php4", ".php5", ".phps"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "php",
+    "keywords": ["abstract", "array", "as", "class", "clone", "const", "echo", "enum", "extends", "final", "fn", "function", "global", "implements", "instanceof", "interface", "namespace", "new", "private", "protected", "public", "readonly", "require", "require_once", "include", "include_once", "static", "trait", "use", "var", "true", "false", "null"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "elseif", "finally", "for", "foreach", "if", "match", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "intelephense", "install": "npm install -g intelephense", "args": ["--stdio"] }
+  },
+  {
+    "id": "kotlin", "name": "Kotlin",
+    "extensions": [".kt", ".kts"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "kotlin",
+    "keywords": ["as", "class", "companion", "data", "enum", "fun", "import", "in", "interface", "internal", "is", "lateinit", "object", "open", "override", "package", "private", "protected", "public", "sealed", "suspend", "this", "super", "typealias", "val", "var", "true", "false", "null"],
+    "controlKeywords": ["break", "catch", "continue", "do", "else", "finally", "for", "if", "return", "throw", "try", "when", "while"],
+    "languageServer": { "command": "kotlin-language-server", "heavy": true, "install": "brew install kotlin-language-server" }
+  },
+  {
+    "id": "dart", "name": "Dart",
+    "extensions": [".dart"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "dart",
+    "keywords": ["abstract", "as", "async", "await", "class", "const", "dynamic", "enum", "extends", "extension", "factory", "final", "get", "implements", "import", "is", "late", "library", "mixin", "new", "required", "set", "static", "super", "this", "typedef", "var", "void", "true", "false", "null"],
+    "controlKeywords": ["break", "case", "catch", "continue", "default", "do", "else", "finally", "for", "if", "in", "return", "switch", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "dart", "args": ["language-server", "--protocol=lsp"] }
+  },
+  {
+    "id": "zig", "name": "Zig",
+    "extensions": [".zig", ".zon"],
+    "lineComment": "//",
+    "grammar": "zig",
+    "keywords": ["const", "var", "fn", "pub", "struct", "enum", "union", "error", "comptime", "inline", "extern", "export", "test", "usingnamespace", "anytype", "type", "void", "true", "false", "null", "undefined"],
+    "controlKeywords": ["break", "continue", "defer", "errdefer", "else", "for", "if", "orelse", "catch", "return", "switch", "try", "while", "unreachable"],
+    "languageServer": { "command": "zls", "install": "brew install zls" }
+  },
+  {
+    "id": "perl", "name": "Perl",
+    "extensions": [".pl", ".pm", ".t", ".pod"],
+    "lineComment": "#",
+    "keywords": ["my", "our", "local", "sub", "package", "use", "require", "no", "bless", "ref"],
+    "controlKeywords": ["if", "elsif", "else", "unless", "while", "until", "for", "foreach", "last", "next", "redo", "return"]
+  },
+  {
+    "id": "r", "name": "R",
+    "extensions": [".r", ".rhistory", ".rprofile"],
+    "lineComment": "#",
+    "grammar": "r",
+    "keywords": ["function", "library", "require", "TRUE", "FALSE", "NULL", "NA", "Inf", "NaN"],
+    "controlKeywords": ["if", "else", "for", "while", "repeat", "break", "next", "return", "in"]
+  },
+  {
+    "id": "powershell", "name": "PowerShell", "aliases": ["ps1", "pwsh"],
+    "extensions": [".ps1", ".psm1", ".psd1"],
+    "lineComment": "#", "blockComment": ["<#", "#>"],
+    "keywords": ["function", "param", "class", "enum", "filter", "begin", "process", "end"],
+    "controlKeywords": ["if", "elseif", "else", "switch", "foreach", "for", "while", "do", "until", "break", "continue", "return", "throw", "try", "catch", "finally", "trap"]
+  },
+  {
+    "id": "bat", "name": "Batch", "aliases": ["batch"],
+    "extensions": [".bat", ".cmd"],
+    "lineComment": "REM"
+  },
+  {
+    "id": "ini", "name": "Ini",
+    "extensions": [".ini", ".cfg", ".conf", ".editorconfig", ".gitconfig"],
+    "filenames": [".editorconfig", ".gitconfig", ".gitmodules"],
+    "lineComment": ";",
+    "grammar": "ini"
+  },
+  {
+    "id": "properties", "name": "Properties",
+    "extensions": [".properties", ".env"],
+    "filenames": [".env", ".npmrc", ".gitattributes"],
+    "lineComment": "#"
+  },
+  {
+    "id": "ignore", "name": "Ignore",
+    "extensions": [".gitignore", ".dockerignore", ".npmignore"],
+    "filenames": [".gitignore", ".dockerignore", ".npmignore", ".ignore", ".prettierignore", ".eslintignore"],
+    "lineComment": "#"
+  },
+  {
+    "id": "diff", "name": "Diff", "aliases": ["patch"],
+    "extensions": [".diff", ".patch", ".rej"],
+    "grammar": "diff"
+  },
+  {
+    "id": "git-commit", "name": "Git Commit Message",
+    "filenames": ["COMMIT_EDITMSG", "MERGE_MSG"],
+    "lineComment": "#"
+  },
+  {
+    "id": "scala", "name": "Scala",
+    "extensions": [".scala", ".sc", ".sbt"],
+    "lineComment": "//", "blockComment": ["/*", "*/"],
+    "grammar": "scala",
+    "keywords": ["abstract", "case", "class", "def", "enum", "extends", "final", "given", "implicit", "import", "lazy", "new", "object", "override", "package", "private", "protected", "sealed", "super", "this", "trait", "type", "using", "val", "var", "with", "true", "false", "null"],
+    "controlKeywords": ["catch", "do", "else", "finally", "for", "if", "match", "return", "then", "throw", "try", "while", "yield"],
+    "languageServer": { "command": "metals", "heavy": true }
+  },
+  {
+    "id": "elixir", "name": "Elixir",
+    "extensions": [".ex", ".exs"],
+    "lineComment": "#",
+    "grammar": "elixir",
+    "keywords": ["def", "defp", "defmodule", "defstruct", "defmacro", "do", "end", "fn", "alias", "import", "require", "use", "true", "false", "nil"],
+    "controlKeywords": ["case", "cond", "else", "if", "unless", "when", "with", "rescue", "catch", "raise", "try", "receive"],
+    "languageServer": { "command": "elixir-ls", "install": "brew install elixir-ls" }
+  },
+  {
+    "id": "haskell", "name": "Haskell",
+    "extensions": [".hs", ".lhs"],
+    "lineComment": "--", "blockComment": ["{-", "-}"],
+    "grammar": "haskell",
+    "keywords": ["class", "data", "deriving", "forall", "import", "infix", "infixl", "infixr", "instance", "let", "module", "newtype", "qualified", "type", "where", "True", "False"],
+    "controlKeywords": ["case", "do", "else", "if", "in", "of", "then"],
+    "languageServer": { "command": "haskell-language-server-wrapper", "heavy": true, "install": "ghcup install hls", "args": ["--lsp"] }
+  }
+]

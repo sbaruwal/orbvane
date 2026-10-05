@@ -1,0 +1,125 @@
+{
+  "type": "object",
+  "allowComments": true,
+  "allowTrailingCommas": true,
+  "required": ["configurations"],
+  "properties": {
+    "version": { "type": "string", "description": "Version of this file format.", "default": "0.2.0" },
+    "configurations": {
+      "type": "array",
+      "description": "List of configurations. Add new configurations or edit existing ones by using IntelliSense.",
+      "items": {
+        "defaultSnippets": [
+          { "label": "LLDB DAP: Launch", "description": "Debug a program with lldb-dap.", "body": { "type": "lldb-dap", "request": "launch", "name": "${1:Launch}", "program": "^\"\\${workspaceFolder}/${2:program}\"", "args": [], "cwd": "^\"\\${workspaceFolder}\"" } },
+          { "label": "LLDB DAP: Attach to Process", "description": "Attach lldb-dap to a running process.", "body": { "type": "lldb-dap", "request": "attach", "name": "${1:Attach}", "pid": "^\"\\${command:pickProcess}\"" } },
+          { "label": "Python Debugger: Current File", "description": "Debug the active Python file.", "body": { "type": "debugpy", "request": "launch", "name": "Python Debugger: Current File", "program": "^\"\\${file}\"", "console": "internalConsole" } },
+          { "label": "Python Debugger: Module", "description": "Debug a Python module (python -m).", "body": { "type": "debugpy", "request": "launch", "name": "Python Debugger: Module", "module": "${1:module}" } },
+          {
+            "label": "Node.js: Launch Program",
+            "description": "Launch a node program in debug mode",
+            "body": { "type": "node", "request": "launch", "name": "${2:Launch Program}", "skipFiles": ["<node_internals>/**"], "program": "^\"\\${workspaceFolder}/${1:app.js}\"" }
+          },
+          { "label": "Node.js: Attach", "description": "Attach to a running node program", "body": { "type": "node", "request": "attach", "name": "${1:Attach}", "port": 9229, "skipFiles": ["<node_internals>/**"] } },
+          { "label": "Go: Launch package", "description": "Debug/test the package in the program attribute", "body": { "name": "${1:Launch Package}", "type": "go", "request": "launch", "mode": "auto", "program": "^\"\\${fileDirname}${2}\"" } },
+          { "label": "Go: Launch test package", "description": "Debug the test package in the program attribute", "body": { "name": "${1:Launch test package}", "type": "go", "request": "launch", "mode": "test", "program": "^\"\\${workspaceFolder}${2}\"" } },
+          { "label": "Go: Connect to server", "description": "Connect to a remote headless debug server", "body": { "name": "${1:Connect to server}", "type": "go", "request": "attach", "mode": "remote", "port": 2345, "host": "127.0.0.1" } }
+        ],
+        "oneOf": [{ "$ref": "#/definitions/lldbDap" }, { "$ref": "#/definitions/debugpy" }, { "$ref": "#/definitions/node" }, { "$ref": "#/definitions/go" }]
+      }
+    }
+  },
+  "definitions": {
+    "common": {
+      "properties": {
+        "name": { "type": "string", "description": "Name of configuration; appears in the launch configuration dropdown menu." },
+        "request": { "enum": ["launch", "attach"], "enumDescriptions": ["Start the program under the debugger.", "Attach to a running process."], "description": "Request type of configuration. Can be \"launch\" or \"attach\"." },
+        "preLaunchTask": { "type": "string", "description": "Task to run before debug session starts." },
+        "cwd": { "type": "string", "description": "Program working directory.", "default": "${workspaceFolder}" },
+        "args": { "type": "array", "items": { "type": "string" }, "description": "Program arguments.", "default": [] },
+        "env": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "Environment variables passed to the program.", "default": {} }
+      },
+      "required": ["type", "request", "name"]
+    },
+    "lldbDap": {
+      "allOf": [{ "$ref": "#/definitions/common" }],
+      "properties": {
+        "type": { "enum": ["lldb-dap", "lldb"], "description": "Type of configuration.", "enumDescriptions": ["LLDB DAP (lldb-dap from Xcode or LLVM).", "Another name for lldb-dap."] },
+        "program": { "type": "string", "description": "Path to the program to debug." },
+        "stopOnEntry": { "type": "boolean", "description": "Automatically stop after launch.", "default": false },
+        "pid": { "type": ["number", "string"], "description": "System process ID to attach to." },
+        "waitFor": { "type": "boolean", "description": "If set to true, then wait for the process to launch by looking for a process with a basename that matches `program`.", "default": false },
+        "initCommands": { "type": "array", "items": { "type": "string" }, "description": "Initialization commands executed upon debugger startup.", "default": [] },
+        "preRunCommands": { "type": "array", "items": { "type": "string" }, "description": "Commands executed just before the program is launched.", "default": [] },
+        "stopCommands": { "type": "array", "items": { "type": "string" }, "description": "Commands executed each time the program stops.", "default": [] },
+        "exitCommands": { "type": "array", "items": { "type": "string" }, "description": "Commands executed when the program exits.", "default": [] },
+        "attachCommands": { "type": "array", "items": { "type": "string" }, "description": "Custom commands that are executed instead of attaching to a process ID or to a process by name.", "default": [] },
+        "sourceMap": { "type": "array", "items": { "type": "array", "items": { "type": "string" }, "minItems": 2, "maxItems": 2 }, "description": "Source path remappings, each a [from, to] pair.", "default": [] }
+      },
+      "required": ["type"]
+    },
+    "debugpy": {
+      "allOf": [{ "$ref": "#/definitions/common" }],
+      "properties": {
+        "type": { "const": "debugpy", "description": "Type of configuration." },
+        "program": { "type": "string", "description": "Absolute path to the program.", "default": "${file}" },
+        "module": { "type": "string", "description": "Name of the module to be debugged." },
+        "console": { "enum": ["internalConsole", "integratedTerminal", "externalTerminal"], "enumDescriptions": ["Debug Console", "Integrated Terminal", "External Terminal"], "description": "Where to launch the debug target.", "default": "internalConsole" },
+        "justMyCode": { "type": "boolean", "description": "If true, show and debug only user-written code. If false, show and debug all code, including library calls.", "default": true },
+        "python": { "type": "string", "description": "Absolute path to the Python interpreter used for debugging. If not specified, `python3` is used." },
+        "stopOnEntry": { "type": "boolean", "description": "Automatically stop after launch.", "default": false },
+        "processId": { "type": ["number", "string"], "description": "The process id to attach to." },
+        "connect": { "type": "object", "description": "The host and port of a debug server to attach to.", "properties": { "host": { "type": "string", "default": "127.0.0.1" }, "port": { "type": "number" } } }
+      },
+      "required": ["type"]
+    },
+    "node": {
+      "allOf": [{ "$ref": "#/definitions/common" }],
+      "properties": {
+        "type": { "enum": ["node", "pwa-node"], "description": "Type of configuration." },
+        "program": { "type": "string", "description": "Absolute path to the program. Generated value is guessed by looking at package.json and opened files. Edit this attribute." },
+        "args": { "type": ["array", "string"], "items": { "type": "string" }, "description": "Command line arguments passed to the program.", "default": [] },
+        "cwd": { "type": "string", "description": "Absolute path to the working directory of the program being debugged.", "default": "${workspaceFolder}" },
+        "runtimeExecutable": { "type": "string", "description": "Runtime to use. Either an absolute path or the name of a runtime available on the PATH. If omitted `node` is assumed.", "default": "node" },
+        "runtimeArgs": { "type": "array", "items": { "type": "string" }, "description": "Optional arguments passed to the runtime executable.", "default": [] },
+        "env": { "type": "object", "additionalProperties": { "type": ["string", "null"] }, "description": "Environment variables passed to the program. The value `null` removes the variable from the environment.", "default": {} },
+        "stopOnEntry": { "type": "boolean", "description": "Automatically stop program after launch.", "default": true },
+        "skipFiles": { "type": "array", "items": { "type": "string" }, "description": "An array of file or folder names, or path globs, to skip when debugging.", "default": ["<node_internals>/**"] },
+        "sourceMaps": { "type": "boolean", "description": "Use JavaScript source maps (if they exist).", "default": true },
+        "outputCapture": { "enum": ["console", "std"], "description": "From where to capture output messages: the default debug API if set to `console`, or stdout/stderr streams if set to `std`.", "default": "console" },
+        "port": { "type": "number", "description": "Debug port to attach to. Default is 9229.", "default": 9229 },
+        "address": { "type": "string", "description": "TCP/IP address of process to be debugged. Default is 'localhost'.", "default": "localhost" },
+        "websocketAddress": { "type": "string", "description": "Exact websocket address to attach to. If unspecified, it will be discovered from the address and port." }
+      },
+      "required": ["type"]
+    },
+    "go": {
+      "allOf": [{ "$ref": "#/definitions/common" }],
+      "properties": {
+        "type": { "const": "go", "description": "Type of configuration." },
+        "mode": {
+          "enum": ["auto", "debug", "test", "exec", "replay", "core", "local", "remote"],
+          "description": "One of `auto`, `debug`, `test`, `exec`, `replay`, `core` (launch), `local` or `remote` (attach). In `auto` mode, `debug` or `test` is chosen depending on the program.",
+          "default": "auto"
+        },
+        "program": {
+          "type": "string",
+          "description": "Path to the program folder (or any go file within that folder) when in `debug` or `test` mode, and to the pre-built binary file to debug in `exec` mode. If it is not an absolute path, it is interpreted as a workspace relative path.",
+          "default": "${fileDirname}"
+        },
+        "args": { "type": ["array", "string"], "items": { "type": "string" }, "description": "Command line arguments passed to the debugged program.", "default": [] },
+        "env": { "type": "object", "description": "Environment variables passed to the launched debuggee program.", "default": {} },
+        "cwd": {
+          "type": "string",
+          "description": "Workspace relative or absolute path to the working directory of the program being debugged if a non-empty value is specified. The `program` folder is used as the working directory if `cwd` is omitted or empty.",
+          "default": "."
+        },
+        "buildFlags": { "type": ["string", "array"], "items": { "type": "string" }, "description": "Build flags, to be passed to the Go compiler. Maps to dlv's `--build-flags` flag.", "default": [] },
+        "stopOnEntry": { "type": "boolean", "description": "Automatically stop program after launch.", "default": false },
+        "processId": { "type": ["number", "string"], "description": "The ID of the process to be debugged." },
+        "host": { "type": "string", "description": "When applied to remote-attach configurations, will look for \"dlv ... --headless --listen=<host>:<port>\" server started externally.", "default": "127.0.0.1" },
+        "port": { "type": "number", "description": "When applied to remote-attach configurations, will look for \"dlv ... --headless --listen=<host>:<port>\" server started externally.", "default": 2345 }
+      },
+      "required": ["type"]
+    }
+  }
+}

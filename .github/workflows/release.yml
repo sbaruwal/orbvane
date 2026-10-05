@@ -1,0 +1,154 @@
+# Builds Orbvane for Apple Silicon, signs and notarizes it, and publishes the .dmg as a GitHub
+# Release, then points the Homebrew cask in sbaruwal/homebrew-tap at it. Runs when a version tag
+# (v0.1.0, matching Cargo.toml's version) is pushed.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag against Cargo.toml
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml's version $version"
+            exit 1
+          fi
+          echo "VERSION=$version" >> "$GITHUB_ENV"
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: release-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+
+      - name: Build
+        run: cargo build --release --locked --bin orbvane
+
+      - name: Bundle
+        run: |
+          app=target/release/Orbvane.app
+          rm -rf "$app"  # the target folder is cached
+          mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+          cp target/release/orbvane "$app/Contents/MacOS/orbvane"
+          cp assets/brand/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
+          plist=$app/Contents/Info.plist
+          pb() { /usr/libexec/PlistBuddy -c "$1" "$plist" > /dev/null; }
+          pb "Add :CFBundleDevelopmentRegion string en"
+          pb "Add :CFBundleDisplayName string Orbvane"
+          pb "Add :CFBundleExecutable string orbvane"
+          pb "Add :CFBundleIconFile string AppIcon"
+          pb "Add :CFBundleIdentifier string dev.orbvane.ide"
+          pb "Add :CFBundleInfoDictionaryVersion string 6.0"
+          pb "Add :CFBundleName string Orbvane"
+          pb "Add :CFBundlePackageType string APPL"
+          pb "Add :CFBundleShortVersionString string $VERSION"
+          pb "Add :CFBundleVersion string $VERSION"
+          pb "Add :LSApplicationCategoryType string public.app-category.developer-tools"
+          pb "Add :LSMinimumSystemVersion string $MACOSX_DEPLOYMENT_TARGET"
+          pb "Add :NSHighResolutionCapable bool true"
+          plutil -lint "$plist"
+
+      - name: Import the signing certificate
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          keychain=$RUNNER_TEMP/signing.keychain-db
+          printf '%s' "$MACOS_CERT_P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$MACOS_CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          rm "$RUNNER_TEMP/cert.p12"
+          identity=$(security find-identity -v -p codesigning "$keychain" | sed -n 's/.*\([0-9A-F]\{40\}\) "Developer ID Application.*/\1/p' | head -1)
+          [ -n "$identity" ] || { echo "::error::No Developer ID Application identity in the certificate"; exit 1; }
+          echo "SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Sign, notarize and build the disk image
+        env:
+          NOTARY_KEY_P8: ${{ secrets.NOTARY_KEY_P8 }}
+          NOTARY_KEY_ID: ${{ secrets.NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.NOTARY_ISSUER_ID }}
+        run: |
+          app=target/release/Orbvane.app
+          dmg=target/release/Orbvane-$VERSION.dmg
+          key=$RUNNER_TEMP/AuthKey.p8
+          printf '%s\n' "$NOTARY_KEY_P8" > "$key"
+          notarize() {
+            xcrun notarytool submit "$1" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID" \
+              --wait --output-format json > "$RUNNER_TEMP/notary.json"
+            if ! grep -q '"status" *: *"Accepted"' "$RUNNER_TEMP/notary.json"; then
+              cat "$RUNNER_TEMP/notary.json"
+              id=$(sed -n 's/.*"id" *: *"\([^"]*\)".*/\1/p' "$RUNNER_TEMP/notary.json")
+              [ -n "$id" ] && xcrun notarytool log "$id" --key "$key" --key-id "$NOTARY_KEY_ID" --issuer "$NOTARY_ISSUER_ID"
+              exit 1
+            fi
+          }
+
+          codesign --force --options runtime --timestamp --sign "$SIGN_IDENTITY" "$app"
+          codesign --verify --strict "$app"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/Orbvane.zip"
+          notarize "$RUNNER_TEMP/Orbvane.zip"
+          xcrun stapler staple "$app"
+
+          mkdir "$RUNNER_TEMP/dmg"
+          ditto "$app" "$RUNNER_TEMP/dmg/Orbvane.app"
+          ln -s /Applications "$RUNNER_TEMP/dmg/Applications"
+          hdiutil create -volname Orbvane -srcfolder "$RUNNER_TEMP/dmg" -fs HFS+ -format UDZO -ov "$dmg"
+          codesign --force --timestamp --sign "$SIGN_IDENTITY" "$dmg"
+          notarize "$dmg"
+          xcrun stapler staple "$dmg"
+          spctl --assess --type open --context context:primary-signature -v "$dmg"
+          rm "$key"
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "target/release/Orbvane-$VERSION.dmg" \
+            --title "Orbvane $VERSION" --generate-notes
+
+      - name: Update the Homebrew cask
+        env:
+          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+        run: |
+          if [ -z "$HOMEBREW_TAP_KEY" ]; then
+            echo "::warning::HOMEBREW_TAP_KEY isn't set; bump Casks/orbvane.rb in sbaruwal/homebrew-tap by hand"
+            exit 0
+          fi
+          sha=$(shasum -a 256 "target/release/Orbvane-$VERSION.dmg" | cut -d' ' -f1)
+          key=$RUNNER_TEMP/tap_key
+          printf '%s\n' "$HOMEBREW_TAP_KEY" > "$key"
+          chmod 600 "$key"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
+          git clone -q git@github.com:sbaruwal/homebrew-tap.git "$RUNNER_TEMP/tap"
+          cd "$RUNNER_TEMP/tap"
+          sed -i '' -e "s/^  version \".*\"/  version \"$VERSION\"/" -e "s/^  sha256 \".*\"/  sha256 \"$sha\"/" Casks/orbvane.rb
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git diff --quiet || { git commit -qam "Orbvane $VERSION" && git push -q; }
+          rm "$key"
+
+      - name: Remove the signing keychain
+        if: always()
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true

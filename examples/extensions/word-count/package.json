@@ -1,0 +1,49 @@
+{
+    "name": "word-count",
+    "displayName": "Word Count",
+    "description": "Counts the words of Markdown and text files in the status bar.",
+    "version": "0.1.0",
+    "publisher": "orbvane",
+    "license": "MIT OR Apache-2.0",
+    "categories": ["Other"],
+    "engines": { "orbvane": "^0.1.0" },
+    "main": "../../../target/debug/word-count",
+    "activationEvents": ["onLanguage:markdown", "onLanguage:plaintext"],
+    "contributes": {
+        "commands": [
+            { "command": "wordCount.show", "title": "Show Word Count", "category": "Word Count" },
+            { "command": "wordCount.chooseMode", "title": "Choose What to Count...", "category": "Word Count" },
+            { "command": "wordCount.find", "title": "Count Occurrences...", "category": "Word Count" },
+            { "command": "wordCount.insertSummary", "title": "Insert Summary at Cursor", "category": "Word Count" }
+        ],
+        "keybindings": [
+            { "command": "wordCount.show", "key": "ctrl+alt+w", "mac": "cmd+alt+w" }
+        ],
+        "configuration": {
+            "title": "Word Count",
+            "properties": {
+                "wordCount.mode": {
+                    "type": "string",
+                    "enum": ["words", "characters", "lines"],
+                    "enumDescriptions": ["Count words.", "Count characters.", "Count lines."],
+                    "default": "words",
+                    "description": "What the status bar counts."
+                },
+                "wordCount.showInStatusBar": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Show the count in the status bar."
+                },
+                "wordCount.ignoredWords": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "default": [],
+                    "description": "Words not counted."
+                }
+            }
+        },
+        "snippets": [
+            { "language": "markdown", "path": "./snippets/markdown.json" }
+        ]
+    }
+}

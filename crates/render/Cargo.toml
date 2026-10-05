@@ -1,0 +1,12 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+wgpu.workspace = true
+cosmic-text.workspace = true
+bytemuck.workspace = true
+theme.workspace = true
+zeno.workspace = true

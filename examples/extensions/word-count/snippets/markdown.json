@@ -1,0 +1,7 @@
+{
+    "Word count note": {
+        "prefix": "wcnote",
+        "body": ["> Word count: ${1:0} words, checked on $CURRENT_YEAR-$CURRENT_MONTH-$CURRENT_DATE", "$0"],
+        "description": "A note with the word count"
+    }
+}

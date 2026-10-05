@@ -1,0 +1,10 @@
+[package]
+name = "terminal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+vte = { version = "0.15", default-features = false }
+libc = "0.2"
+unicode-width = "0.2"
