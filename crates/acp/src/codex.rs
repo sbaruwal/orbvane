@@ -81,6 +81,8 @@ struct Bridge {
     default_model: Option<String>,
     /// The model each turn asks for, when the configured one isn't offered.
     model_override: Option<String>,
+    /// The thread's configured model, until it's been checked against the account's.
+    unchecked_model: Option<String>,
     thread: Option<String>,
     turn: Option<String>,
     /// The editor's `session/prompt` waiting for the turn to end.
@@ -122,6 +124,7 @@ pub fn serve(options: Options, rx: Receiver<Value>, tx: Sender<Value>, log: Send
         models: Vec::new(),
         default_model: None,
         model_override: None,
+        unchecked_model: None,
         thread: None,
         turn: None,
         prompt: None,
@@ -307,6 +310,10 @@ impl Bridge {
                         self.default_model = Some(id.to_string());
                     }
                 }
+                // The thread started before the list arrived.
+                if let Some(model) = self.unchecked_model.take() {
+                    self.check_model(&model);
+                }
             }
             (Pending::Account, Ok(r)) => {
                 let needs = r["requiresOpenaiAuth"].as_bool().unwrap_or(false);
@@ -338,7 +345,13 @@ impl Bridge {
     /// turns use the default one instead, and the chat says so.
     fn check_model(&mut self, model: &str) {
         self.model_override = None;
-        if model.is_empty() || self.models.is_empty() || self.models.iter().any(|(id, _)| id == model) {
+        if self.models.is_empty() {
+            self.unchecked_model = Some(model.to_string()).filter(|m| !m.is_empty());
+            return;
+        }
+        let ids: Vec<&str> = self.models.iter().map(|(id, _)| id.as_str()).collect();
+        let _ = self.log.send(format!("Codex: the chat's model is {model:?}; the account offers {}.", ids.join(", ")));
+        if model.is_empty() || ids.contains(&model) {
             return;
         }
         let Some(default) = self.default_model.clone() else { return };
@@ -417,8 +430,11 @@ impl Bridge {
         match turn["status"].as_str() {
             Some("interrupted") => self.reply(id, json!({ "stopReason": "cancelled" })),
             Some("failed") => {
-                let message = turn["error"]["message"].as_str().unwrap_or("The turn failed.");
-                self.reply_error(id, INTERNAL, &friendly(message));
+                let mut message = friendly(turn["error"]["message"].as_str().unwrap_or("The turn failed."));
+                if message.contains("model") && message.contains("not supported") {
+                    message.push_str(" Codex's model is set in ~/.codex/config.toml (`model = ...`).");
+                }
+                self.reply_error(id, INTERNAL, &message);
             }
             _ => self.reply(id, json!({ "stopReason": "end_turn" })),
         }

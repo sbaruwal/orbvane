@@ -1700,6 +1700,48 @@ mod agent_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The real agent named by `ORBVANE_REAL_AGENT` (claude-code or codex), with its real tool:
+    /// one small prompt in a scratch folder, every question answered Allow. Uses the account,
+    /// so it only runs when asked: `ORBVANE_REAL_AGENT=codex cargo test -p app real_agent -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn real_agent() {
+        let Ok(id) = std::env::var("ORBVANE_REAL_AGENT") else { return };
+        let (mut wb, dir) = workbench(&format!("real-{id}"), &format!(r#"{{ "assistant.agent": "{id}" }}"#));
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        wb.open_file(&file);
+        type_and_send(&mut wb, "In notes.txt, change hello to goodbye. Then run `ls -1`. Reply with one short sentence.");
+        let start = Instant::now();
+        let mut shown = 0;
+        loop {
+            std::thread::sleep(Duration::from_millis(50));
+            wb.assistant_tick();
+            let entries = wb.assistant.entries.clone();
+            for (i, e) in entries.iter().enumerate() {
+                if let Entry::Permission(p) = e {
+                    if p.answer.is_none() {
+                        eprintln!("asked: {} ({:?}), diffs: {:?}", p.title, p.options.iter().map(|o| &o.1).collect::<Vec<_>>(), p.diffs.iter().map(|d| &d.new_text).collect::<Vec<_>>());
+                        wb.assistant_answer(i, 0);
+                    }
+                }
+            }
+            for e in &wb.assistant.entries[shown.min(wb.assistant.entries.len())..] {
+                eprintln!("entry: {e:?}");
+            }
+            shown = wb.assistant.entries.len();
+            let done = wb.assistant.phase == Phase::Ready || (wb.assistant.client.is_none() && start.elapsed() > Duration::from_secs(5));
+            if done || start.elapsed() > Duration::from_secs(240) {
+                break;
+            }
+        }
+        eprintln!("final entries: {:#?}", wb.assistant.entries);
+        eprintln!("output: {:#?}", wb.output.lines("Assistant"));
+        eprintln!("file: {:?}", std::fs::read_to_string(&file));
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A custom command that isn't an agent (it exits at once): the transcript says so, quotes
     /// what it printed and offers the agents.
     #[test]

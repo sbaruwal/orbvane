@@ -5,7 +5,8 @@ For each turn it streams reasoning and a reply (naming the model the turn asked 
 the plan, proposes a change to the file the prompt mentions (its first line, "hello" →
 "goodbye"), asks for approval, applies it when accepted, runs a command, and ends the turn.
 A prompt with "fail" ends in an error; one with "wait" waits to be interrupted. Its threads
-start with a model the account doesn't offer, so the bridge picks the default.
+start with a model the account doesn't offer, so the bridge picks the default; like the real
+one, it answers the model list after the thread has started.
 """
 import json
 import re
@@ -13,6 +14,8 @@ import sys
 
 next_id = 900
 thread = "t1"
+models_request = None
+MODELS = {"data": [{"id": "m1", "displayName": "Model One", "isDefault": True}, {"id": "m2", "displayName": "Model Two", "isDefault": False}]}
 
 
 def send(msg):
@@ -105,13 +108,16 @@ def handle(msg):
     if method == "initialize":
         send({"id": rid, "result": {"userAgent": "orbvane/9.9.9 (test)", "platformOs": "macos"}})
     elif method == "model/list":
-        send({"id": rid, "result": {"data": [{"id": "m1", "displayName": "Model One", "isDefault": True}, {"id": "m2", "displayName": "Model Two", "isDefault": False}]}})
+        global models_request
+        models_request = rid
     elif method == "account/read":
         send({"id": rid, "result": {"account": {"type": "chatgpt"}, "requiresOpenaiAuth": True}})
     elif method == "thread/start":
         servers = sorted((params.get("config") or {}).get("mcp_servers", {}).keys())
         print("mcp servers: %s" % servers, file=sys.stderr, flush=True)
         send({"id": rid, "result": {"thread": {"id": thread}, "model": "retired-model"}})
+        if models_request is not None:
+            send({"id": models_request, "result": MODELS})
     elif method == "turn/start":
         turn(rid, params)
     elif rid is not None and method is not None:
