@@ -211,6 +211,8 @@ show their message after the failing line, and Test Results has the output.
 - **Go:** `go test -json`, including subtests, benchmarks and fuzz tests, with "run test | debug
   test" lenses.
 - **Python:** pytest, run with the workspace's interpreter and debugged with debugpy.
+- **JavaScript/TypeScript:** Jest or Vitest (from the folder's `node_modules`), tests found in
+  `*.test.*`, `*.spec.*` and `__tests__/` files; Jest tests can be debugged.
 
 </details>
 

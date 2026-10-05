@@ -5,9 +5,10 @@
 //! Testing view, gutter icons, failure messages, Test Results).
 //!
 //! Providers today: rust-analyzer's test explorer (`rust_analyzer.rs`), Go (`go.rs`: `go test
-//! -json`) and pytest (`pytest.rs`). Others (extensions) implement the same trait.
+//! -json`), pytest (`pytest.rs`) and Jest/Vitest (`jest.rs`). Others (extensions) implement the same trait.
 
 pub mod go;
+pub mod jest;
 pub mod process;
 pub mod pytest;
 pub mod rust_analyzer;
@@ -152,6 +153,9 @@ pub fn providers_for(root: &Path, waker: &lsp::Waker) -> Vec<Box<dyn TestProvide
         out.push(Box::new(p));
     }
     if let Some(p) = pytest::PytestTests::detect(root, waker) {
+        out.push(Box::new(p));
+    }
+    if let Some(p) = jest::JestTests::detect(root, waker) {
         out.push(Box::new(p));
     }
     out
