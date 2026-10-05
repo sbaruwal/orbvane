@@ -1,0 +1,37 @@
+name: Bug report
+description: Something doesn't work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a folder with ...
+        2. ...
+  - type: input
+    id: version
+    attributes:
+      label: Orbvane version
+      description: Orbvane → About Orbvane
+    validations:
+      required: true
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: For a crash, the end of ~/Library/Application Support/Orbvane/logs/panic.log. For a language server, debugger or agent, its channel in View → Output.
+      render: text

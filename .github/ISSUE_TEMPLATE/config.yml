@@ -1,0 +1,5 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Extensions
+    url: https://github.com/sbaruwal/orbvane-extensions/issues
+    about: Problems with a particular extension, or publishing one

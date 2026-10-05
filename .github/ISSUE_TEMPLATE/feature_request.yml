@@ -1,0 +1,20 @@
+name: Feature request
+description: Something Orbvane could do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you're trying to do
+      description: The task or problem, rather than a particular solution.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: How it could work
+  - type: textarea
+    id: context
+    attributes:
+      label: Anything else
+      description: Languages, tools or workflows it involves.

@@ -123,6 +123,19 @@ impl Status {
     }
 }
 
+/// Whether git can run: its version, or why not (checked once). On a Mac without the Command
+/// Line Tools, `/usr/bin/git` is only a stub that offers to install them and fails.
+pub fn available() -> Result<String, String> {
+    static CHECK: std::sync::OnceLock<Result<String, String>> = std::sync::OnceLock::new();
+    CHECK
+        .get_or_init(|| match Command::new("git").arg("--version").output() {
+            Ok(out) if out.status.success() => Ok(String::from_utf8_lossy(&out.stdout).trim().to_string()),
+            Ok(out) => Err(String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Err(e) => Err(e.to_string()),
+        })
+        .clone()
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<Output, String> {
     let mut cmd = Command::new("git");
     cmd.arg("-C").arg(root).args(args);

@@ -320,6 +320,7 @@ fn build_menu() -> Menu {
             &menu_item(Command::SplitEditor),
             &sep(),
             &menu_item(Command::ToggleTerminal),
+            &menu_item(Command::ToggleOutput),
             &menu_item(Command::ToggleDebugConsole),
             &sep(),
             &menu_item(Command::ShowExplorer),

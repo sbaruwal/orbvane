@@ -413,6 +413,7 @@ standard function keys").
 | ⌃\` / ⌃⇧\` | Toggle terminal / new terminal |
 | ⌘\\ / ⌘K (terminal) | Split / clear terminal |
 | ⇧⌘B | Run build task |
+| ⇧⌘U | Output panel |
 
 </details>
 
@@ -460,6 +461,23 @@ Every setting is listed with its description in the Settings editor.
 
 </details>
 
+## Known limitations
+
+- **Mac only:** macOS 14 or later on Apple Silicon. There are no Intel, Linux or Windows builds.
+- **Local folders only:** no remote development over SSH or in containers, no settings sync and no
+  shared editing sessions.
+- **Notebooks** (`.ipynb`) open as plain JSON.
+- **Extensions:** extensions from Open VSX contribute themes, snippets, languages and settings, but
+  their JavaScript code doesn't run. Extensions can't show web views.
+- **Language features come from language servers.** Orbvane offers to install a missing one, but
+  some languages have only highlighting until you do.
+- **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools. The Node.js
+  debugger doesn't follow child processes or workers.
+- **Assistant:** Claude Code and Codex read files from disk, so Orbvane saves your unsaved changes
+  before each message (`assistant.saveBeforeSending`).
+
+Found something else? [Open an issue](https://github.com/sbaruwal/orbvane/issues/new/choose).
+
 ## Updates and privacy
 
 Orbvane updates itself. It checks GitHub for a new release at startup and every 12 hours,
@@ -480,7 +498,7 @@ cd orbvane
 cargo run --release -- <folder> [files...]
 ```
 
-Needs a recent stable Rust on macOS 14 or later.
+Needs a recent stable Rust on macOS 14 or later. To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
 <details>
 <summary>How it's built, and the crates</summary>

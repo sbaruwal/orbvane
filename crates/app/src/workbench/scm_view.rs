@@ -39,6 +39,8 @@ pub(super) enum ScmAction {
     ContinueRebase,
     Refresh,
     InitRepo,
+    /// No git: `xcode-select --install` in a terminal.
+    InstallGit,
     StageAll,
     UnstageAll,
     DiscardAll,
@@ -646,6 +648,12 @@ impl Workbench {
             ScmAction::ContinueRebase => self.run(crate::commands::Command::GitContinueRebase),
             ScmAction::Refresh => self.refresh_scm(),
             ScmAction::InitRepo => self.init_repo(),
+            ScmAction::InstallGit => {
+                let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
+                if let Err(e) = self.run_task_terminal("Install the Command Line Tools", "xcode-select --install", &home, &[]) {
+                    self.set_status_message(&e);
+                }
+            }
             ScmAction::StageAll => {
                 let paths: Vec<PathBuf> = self.section_changes(Section::Changes).into_iter().map(|c| c.path).collect();
                 if !paths.is_empty() {
@@ -796,6 +804,25 @@ impl Workbench {
         let w = body.w - 24.0;
         let Some(repo) = &self.repo else {
             let style = TextStyle::ui(UI, fg);
+            // No git at all (no Command Line Tools): say so, and offer to install them.
+            if self.tree.is_some() && scm::git_available().is_err() {
+                let mut y = body.y + 8.0;
+                let msg = "Source control needs git, which isn't installed. macOS installs it with the Command Line Tools (or install it with Homebrew: brew install git), then reopen the folder.";
+                for line in wrap(c, msg, &style, w) {
+                    c.text(x, y, &line, &style);
+                    y += style.line_height;
+                }
+                let btn = Rect::new(x, y + 10.0, w, 26.0);
+                let hit = Hit::Scm(ScmAction::InstallGit);
+                let bg = self.color(if self.hovered(hit) { "button.hoverBackground" } else { "button.background" });
+                c.fill_rounded(btn, bg, 2.0);
+                let bs = TextStyle::ui(UI, self.color("button.foreground"));
+                let label = "Install the Command Line Tools";
+                let tw = c.measure(label, &bs);
+                c.text_in(Rect::new(btn.x + (btn.w - tw) / 2.0, btn.y, tw + 1.0, btn.h), label, &bs);
+                self.hits.push((btn, hit));
+                return;
+            }
             let msg = if self.tree.is_some() {
                 "The folder currently open doesn't have a git repository. You can initialize a repository which will enable source control features powered by git."
             } else {

@@ -131,6 +131,7 @@ const UI: f32 = 13.0;
 const SMALL: f32 = 11.0;
 const CARET_BLINK: Duration = Duration::from_millis(530);
 const PANEL_TABS: &[&str] = &["PROBLEMS", "OUTPUT", "DEBUG CONSOLE", "TERMINAL", "PORTS"];
+const PANEL_OUTPUT: usize = 1;
 const PANEL_DEBUG_CONSOLE: usize = 2;
 const PANEL_TERMINAL: usize = 3;
 /// Test Results, shown after PORTS while the folder has tests.
@@ -1406,6 +1407,14 @@ impl Workbench {
             Command::DebugConfigure => self.open_launch_json(),
             Command::DebugSelectAndStart => self.select_and_start(),
             Command::DebugAddWatch => self.add_watch_selection(),
+            Command::ToggleOutput => {
+                if self.panel_visible && self.panel_tab == PANEL_OUTPUT {
+                    self.panel_visible = false;
+                } else {
+                    self.panel_visible = true;
+                    self.panel_tab = PANEL_OUTPUT;
+                }
+            }
             Command::ToggleDebugConsole => {
                 if self.panel_visible && self.panel_tab == PANEL_DEBUG_CONSOLE {
                     self.panel_visible = false;

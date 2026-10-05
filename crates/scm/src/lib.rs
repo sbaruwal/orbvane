@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 
 pub use diff::{apply_changes, hunks, line_changes, side_by_side, DiffRow, LineChange};
-pub use git::{clone, clone_dir_name, commit_refs, git_dir, repo_root, show, Change, LogEntry, FileStatus, Ref, RefKind, Remote, Stash, Status};
+pub use git::{available as git_available, clone, clone_dir_name, commit_refs, git_dir, repo_root, show, Change, LogEntry, FileStatus, Ref, RefKind, Remote, Stash, Status};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
