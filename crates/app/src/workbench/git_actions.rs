@@ -66,6 +66,8 @@ pub enum GitInput {
     EmmetWrap,
     /// An input box an extension asked for.
     Extension,
+    /// The command of a custom Assistant agent.
+    AgentCommand,
 }
 
 /// What to run once the commit in progress succeeds.
@@ -194,7 +196,7 @@ impl Workbench {
         self.update_setting(Scope::User, key, Some(Value::Bool(value)));
     }
 
-    fn open_input(&mut self, prompt: &str, placeholder: &str, purpose: GitInput, value: &str) {
+    pub(super) fn open_input(&mut self, prompt: &str, placeholder: &str, purpose: GitInput, value: &str) {
         let input = InputBox { prompt: format!("{prompt} {PRESS_ENTER}"), placeholder: placeholder.into(), purpose, error: None, password: false };
         let mut p = Palette::with_input(input, value);
         self.validate_input(&mut p);
@@ -488,6 +490,7 @@ impl Workbench {
             GitInput::Breakpoint(path, line, field) => self.set_breakpoint_field(path, line, field, value),
             GitInput::Watch(index) => self.set_watch(index, value),
             GitInput::EmmetWrap => self.emmet_wrap(value),
+            GitInput::AgentCommand => self.set_custom_agent(value),
             GitInput::Extension => self.ext_answer(serde_json::json!(value)),
             GitInput::NewBranch { from } => self.git_run(Op::CreateBranch { name: sanitize_branch(&value), from }),
             GitInput::RenameBranch => {

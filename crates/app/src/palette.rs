@@ -36,6 +36,8 @@ pub enum Action {
     Language(language::Lang),
     /// An item of a quick pick an extension asked for (its index).
     ExtPick(usize),
+    /// Choose the Assistant's agent (Assistant: Select Agent).
+    Agent(crate::workbench::AgentAction),
 }
 
 /// What the quick input lists, from the prefix typed.

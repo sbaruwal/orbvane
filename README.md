@@ -417,7 +417,7 @@ and formatting in them are kept when the editor changes them.
 | `files.hotExit` | Keep unsaved changes across quits |
 | `git.autofetch`, `git.confirmSync` | Background fetch, ask before sync |
 | `languageServers.stopWhenIdle` | Stop idle language servers |
-| `assistant.agent.command` | The agent the Assistant starts |
+| `assistant.agent`, `assistant.agent.command` | The agent the Assistant talks to (or a custom command) |
 | `update.mode` | `default`, `manual` or `none` |
 
 Every setting is listed with its description in the Settings editor.

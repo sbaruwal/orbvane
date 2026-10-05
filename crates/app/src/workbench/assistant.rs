@@ -1,11 +1,17 @@
-//! The Assistant: a chat with a coding agent in the secondary sidebar. The agent is any
-//! program that speaks the Agent Client Protocol (`crate acp`), started from
-//! `assistant.agent.command`. It reads and writes files through the editor (open documents
-//! included, unsaved changes and all), asks before acting (`session/request_permission`: the
-//! options are buttons in the transcript), and with `assistant.editorTools` it can ask our
-//! language servers about the code (`mcp.rs`).
+//! The Assistant: a chat with a coding agent in the secondary sidebar. The agent is one of
+//! the agents Orbvane knows (`crate::agents`, picked with `assistant.agent`) or any program that
+//! speaks the Agent Client Protocol (`crate acp`), started from `assistant.agent.command`. It
+//! reads and writes files through the editor (open documents included, unsaved changes and
+//! all), asks before acting (`session/request_permission`: the options are buttons in the
+//! transcript), and with `assistant.editorTools` it can ask our language servers about the code
+//! (`mcp.rs`).
+//!
+//! Without an agent the Assistant shows the known ones with what their tools need (installed,
+//! signed in: `agents::probe`), and installing or signing in runs in a task terminal.
 
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::{Duration, Instant};
 
 use acp::update::{self, ToolContent, Update};
@@ -13,8 +19,11 @@ use acp::{Client, Incoming};
 use render::{Canvas, Color, Rect, TextStyle};
 use serde_json::{json, Value};
 
-use super::{Focus, Hit, Workbench, SMALL, UI};
+use super::preferences::PopupAction;
+use super::{Focus, Hit, PopupItem, Workbench, SMALL, UI};
+use crate::agents::{self, Choice, Probe};
 use crate::icons;
+use crate::palette::{Action, Item, Palette, Picker};
 use crate::widgets::TextField;
 
 /// The error code agents answer `session/new` with when the user has to sign in first.
@@ -22,6 +31,23 @@ const AUTH_REQUIRED: i64 = -32000;
 const OUTPUT_CHANNEL: &str = "Assistant";
 const INPUT_H: f32 = 30.0;
 const PAD: f32 = 12.0;
+/// How many of the agent's last stderr lines an error quotes.
+const RECENT_LOG: usize = 4;
+
+/// Something to do about the agent: from the setup screen, the agent menu, a picker or a
+/// button in the transcript.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum AgentAction {
+    /// Use this agent (`assistant.agent`).
+    Use(&'static str),
+    /// Install its tool, or sign in to it, in a terminal.
+    Install(&'static str),
+    SignIn(&'static str),
+    /// Ask for a custom command.
+    Custom,
+    /// Show the agents to choose from.
+    Choose,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Tool {
@@ -56,6 +82,8 @@ pub(super) enum Entry {
     /// Sign-in choices: (method id, name).
     Auth(Vec<(String, String)>),
     Notice(String),
+    /// A message with buttons: what to do about the agent.
+    Action(String, Vec<(String, AgentAction)>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,12 +126,25 @@ pub(super) struct Assistant {
     started: Option<Instant>,
     /// The folder the agent was started in.
     cwd: Option<PathBuf>,
-    /// The command it was started with.
+    /// The agent it is (`Choice::key`).
     command: String,
+    /// What the checks found about the known agents' tools, the ones being checked, and where
+    /// the checks answer.
+    pub probes: HashMap<&'static str, Probe>,
+    probing: HashSet<&'static str>,
+    probe_tx: Sender<(&'static str, Probe)>,
+    probe_rx: Receiver<(&'static str, Probe)>,
+    /// Install and sign-in terminals running: task label → agent id.
+    tasks: HashMap<String, &'static str>,
+    /// The agent's last lines on stderr.
+    recent_log: VecDeque<String>,
+    /// Where the agent menu opens (below its button).
+    menu_at: (f32, f32),
 }
 
 impl Default for Assistant {
     fn default() -> Self {
+        let (probe_tx, probe_rx) = mpsc::channel();
         Self {
             client: None,
             phase: Phase::Off,
@@ -125,6 +166,13 @@ impl Default for Assistant {
             started: None,
             cwd: None,
             command: String::new(),
+            probes: HashMap::new(),
+            probing: HashSet::new(),
+            probe_tx,
+            probe_rx,
+            tasks: HashMap::new(),
+            recent_log: VecDeque::new(),
+            menu_at: (0.0, 0.0),
         }
     }
 }
@@ -143,8 +191,9 @@ fn slice_lines(text: &str, line: Option<u64>, limit: Option<u64>) -> String {
 }
 
 impl Workbench {
-    fn agent_command(&self) -> String {
-        self.settings.string("assistant.agent.command").trim().to_string()
+    /// The agent the settings name.
+    pub(super) fn agent_choice(&self) -> Choice {
+        agents::choice(&self.settings.string("assistant.agent"), &self.settings.string("assistant.agent.command"))
     }
 
     /// The folder the agent works in.
@@ -159,10 +208,52 @@ impl Workbench {
 
     /// Starts the agent (if one is set up and it isn't running).
     pub(super) fn assistant_start(&mut self) {
-        let command = self.agent_command();
-        if command.is_empty() || self.assistant.client.is_some() {
+        if self.assistant.client.is_some() {
             return;
         }
+        match self.agent_choice() {
+            Choice::None => {
+                self.assistant.queued = None;
+                self.assistant_choose_prompt("Choose the agent to talk to first.");
+            }
+            Choice::Custom(command) => self.start_custom_agent(&command),
+            Choice::Builtin(a) => self.start_builtin_agent(a),
+        }
+    }
+
+    /// One of our agents: its tool has to be installed and signed in.
+    fn start_builtin_agent(&mut self, a: &'static agents::Agent) {
+        if !self.agent_ready(a) {
+            self.assistant.queued = None;
+            return;
+        }
+        self.assistant.queued = None;
+        self.assistant_notice(format!("Orbvane can't talk to {} yet: support for it is on its way.", a.name));
+    }
+
+    /// Whether `a`'s tool is installed and signed in, as far as the last check knows; if
+    /// not, the transcript says what to do (a check still running counts as ready).
+    fn agent_ready(&mut self, a: &'static agents::Agent) -> bool {
+        let Some(p) = self.assistant.probes.get(a.id).cloned() else {
+            self.assistant_probe(a);
+            return true;
+        };
+        if p.path.is_none() {
+            let text = format!("{} needs its command line tool, `{}`, which isn't installed.", a.name, a.program);
+            self.assistant_action(text, vec![(format!("Install {}", a.name), AgentAction::Install(a.id)), ("Choose Another Agent".into(), AgentAction::Choose)]);
+            return false;
+        }
+        if !p.signed_in {
+            let text = format!("{} needs you to sign in first.", a.name);
+            self.assistant_action(text, vec![("Sign In".into(), AgentAction::SignIn(a.id)), ("Choose Another Agent".into(), AgentAction::Choose)]);
+            return false;
+        }
+        true
+    }
+
+    /// An Agent Client Protocol agent started with `command` through the login shell.
+    fn start_custom_agent(&mut self, command: &str) {
+        let key = Choice::Custom(command.to_string()).key();
         let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
         // The login shell finds the agent the way a terminal would; exec so it gets the signals.
         let args = vec!["-l".to_string(), "-c".to_string(), format!("exec {command}")];
@@ -175,7 +266,8 @@ impl Workbench {
                 self.assistant.phase = Phase::Starting;
                 self.assistant.started = Some(Instant::now());
                 self.assistant.cwd = Some(cwd);
-                self.assistant.command = command.clone();
+                self.assistant.command = key;
+                self.assistant.recent_log.clear();
                 self.output.append(OUTPUT_CHANNEL, &format!("Starting {command}\n"));
             }
             Err(e) => self.assistant_notice(format!("Couldn't start the agent ({command}): {e}")),
@@ -192,12 +284,168 @@ impl Workbench {
         }
     }
 
-    /// The agent command setting changed: the next message starts the new one.
+    /// The agent settings changed: the next message starts the new agent.
     pub(super) fn assistant_settings_changed(&mut self) {
-        if self.assistant.client.is_some() && self.assistant.command != self.agent_command() {
+        let choice = self.agent_choice();
+        if self.assistant.client.is_some() && self.assistant.command != choice.key() {
             self.assistant_stop();
-            self.assistant_notice("The agent command changed. The next message starts the new agent.");
+            self.assistant_notice(format!("Switched to {}. The next message starts it.", choice.label()));
         }
+    }
+
+    /// A message with buttons in the transcript.
+    fn assistant_action(&mut self, text: String, actions: Vec<(String, AgentAction)>) {
+        self.assistant.entries.push(Entry::Action(text, actions));
+        self.assistant.scroll = 0.0;
+    }
+
+    fn assistant_choose_prompt(&mut self, text: &str) {
+        self.assistant_action(text.into(), vec![("Choose Agent".into(), AgentAction::Choose)]);
+    }
+
+    // ------------------------------------------------------------------ choosing an agent
+
+    /// Checks `a`'s tool (installed? signed in?) in the background.
+    fn assistant_probe(&mut self, a: &'static agents::Agent) {
+        // Tests set `probes` themselves rather than run the real tools.
+        if cfg!(test) {
+            return;
+        }
+        if self.assistant.probing.insert(a.id) {
+            let waker = self.waker.clone();
+            agents::probe(a, self.assistant.probe_tx.clone(), move || waker());
+        }
+    }
+
+    /// Checks every known agent that hasn't been checked.
+    fn assistant_probe_all(&mut self) {
+        for a in agents::AGENTS {
+            if !self.assistant.probes.contains_key(a.id) {
+                self.assistant_probe(a);
+            }
+        }
+    }
+
+    /// What the setup screen and pickers say about `a`.
+    fn agent_status(&self, a: &agents::Agent) -> (String, AgentAction) {
+        match self.assistant.probes.get(a.id) {
+            _ if self.assistant.probing.contains(a.id) && !self.assistant.probes.contains_key(a.id) => ("Checking…".into(), AgentAction::Use(a.id)),
+            None => (String::new(), AgentAction::Use(a.id)),
+            Some(p) if p.path.is_none() => (format!("`{}` isn't installed", a.program), AgentAction::Install(a.id)),
+            Some(p) if !p.signed_in => (format!("{} · not signed in", p.version), AgentAction::SignIn(a.id)),
+            Some(p) => (format!("{} · signed in", p.version), AgentAction::Use(a.id)),
+        }
+    }
+
+    /// What the setup screen's button for `a` does.
+    pub(super) fn agent_setup_action(&self, a: &'static agents::Agent) -> AgentAction {
+        self.agent_status(a).1
+    }
+
+    pub(crate) fn agent_action(&mut self, action: AgentAction) {
+        match action {
+            AgentAction::Use(id) => self.use_agent(id, settings::Scope::User),
+            AgentAction::Install(id) => self.agent_task(id, true),
+            AgentAction::SignIn(id) => self.agent_task(id, false),
+            AgentAction::Custom => {
+                let current = self.settings.string("assistant.agent.command");
+                let purpose = super::GitInput::AgentCommand;
+                self.open_input("The command that starts an agent that speaks the Agent Client Protocol (press Enter to confirm or Escape to cancel)", "Agent command", purpose, current.trim());
+            }
+            AgentAction::Choose => self.assistant_select_agent(),
+        }
+    }
+
+    /// Makes `id` the agent (saved in `scope`), and says what it still needs.
+    fn use_agent(&mut self, id: &'static str, scope: settings::Scope) {
+        let Some(a) = agents::find(id) else { return };
+        self.update_setting(scope, "assistant.agent", Some(Value::String(id.into())));
+        self.apply_settings();
+        // Old advice about choosing goes; the new agent's needs show when it starts.
+        self.assistant.entries.retain(|e| !matches!(e, Entry::Action(..)));
+        self.show_aux(super::aux_bar::AuxTab::Assistant);
+        self.focus = Focus::Assistant;
+        if self.assistant.probes.contains_key(id) {
+            self.agent_ready(a);
+        } else {
+            self.assistant_probe(a);
+        }
+    }
+
+    /// A custom command was typed.
+    pub(super) fn set_custom_agent(&mut self, command: String) {
+        self.update_setting(settings::Scope::User, "assistant.agent.command", Some(Value::String(command)));
+        self.update_setting(settings::Scope::User, "assistant.agent", Some(Value::String("custom".into())));
+        self.apply_settings();
+        self.assistant.entries.retain(|e| !matches!(e, Entry::Action(..)));
+        self.show_aux(super::aux_bar::AuxTab::Assistant);
+        self.focus = Focus::Assistant;
+    }
+
+    /// Installs `id`'s tool (or signs in to it) in a task terminal; `assistant_task_done` follows.
+    fn agent_task(&mut self, id: &'static str, install: bool) {
+        let Some(a) = agents::find(id) else { return };
+        let (label, command) = if install { (format!("Install {}", a.name), a.install) } else { (format!("Sign In to {}", a.name), a.sign_in) };
+        let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| "/".into());
+        match self.run_task_terminal(&label, command, &home, &[]) {
+            Ok(()) => {
+                self.assistant.tasks.insert(label, id);
+            }
+            Err(e) => self.assistant_notice(e),
+        }
+    }
+
+    /// A task ended: if it was an install or sign-in, the agent is checked again. Returns
+    /// whether it was one.
+    pub(super) fn assistant_task_done(&mut self, label: &str, code: Option<i32>) -> bool {
+        let Some(id) = self.assistant.tasks.remove(label) else { return false };
+        let Some(a) = agents::find(id) else { return true };
+        if code != Some(0) {
+            self.assistant_notice(format!("{label} didn't finish. The terminal shows what happened."));
+        }
+        self.assistant.probes.remove(id);
+        self.assistant.entries.retain(|e| !matches!(e, Entry::Action(..)));
+        self.assistant_probe(a);
+        true
+    }
+
+    /// Assistant: Select Agent: the agents in the palette.
+    pub(super) fn assistant_select_agent(&mut self) {
+        self.assistant_probe_all();
+        let current = self.agent_choice();
+        let mut choices: Vec<Item> = agents::AGENTS
+            .iter()
+            .map(|a| {
+                let (status, _) = self.agent_status(a);
+                let mark = if current == Choice::Builtin(a) { " (current)" } else { "" };
+                Item { label: format!("{}{mark}", a.name), detail: status, matches: Vec::new(), shortcut: None, action: Action::Agent(AgentAction::Use(a.id)), group: None, kind: None }
+            })
+            .collect();
+        let custom = match &current {
+            Choice::Custom(command) => format!("{command} (current)"),
+            _ => "Any agent that speaks the Agent Client Protocol".into(),
+        };
+        choices.push(Item { label: "Custom Command…".into(), detail: custom, matches: Vec::new(), shortcut: None, action: Action::Agent(AgentAction::Custom), group: None, kind: None });
+        self.palette = Some(Palette::with_picker(Picker { placeholder: "Select the agent the Assistant talks to".into(), choices }));
+    }
+
+    /// The agent menu below the message box.
+    pub(super) fn assistant_agent_menu(&mut self) {
+        self.assistant_probe_all();
+        let current = self.agent_choice();
+        let mut entries: Vec<(PopupItem, PopupAction)> = agents::AGENTS
+            .iter()
+            .map(|a| (PopupItem::Item { label: a.name.into(), enabled: true, checked: Some(current == Choice::Builtin(a)) }, PopupAction::Agent(AgentAction::Use(a.id))))
+            .collect();
+        entries.push((PopupItem::Separator, PopupAction::None));
+        let custom = matches!(current, Choice::Custom(_));
+        entries.push((PopupItem::Item { label: "Custom Command…".into(), enabled: true, checked: Some(custom) }, PopupAction::Agent(AgentAction::Custom)));
+        if let Choice::Builtin(a) = current {
+            entries.push((PopupItem::Separator, PopupAction::None));
+            entries.push((PopupItem::Item { label: format!("Sign In to {}…", a.name), enabled: true, checked: None }, PopupAction::Agent(AgentAction::SignIn(a.id))));
+        }
+        let (x, y) = self.assistant.menu_at;
+        self.show_popup(entries, x, y);
     }
 
     /// Stops the agent (quitting, or the command changed).
@@ -260,8 +508,8 @@ impl Workbench {
         if text.is_empty() || self.assistant.phase == Phase::Working {
             return;
         }
-        if self.agent_command().is_empty() {
-            self.assistant_notice("No agent is set up. Set Assistant: Agent Command in Settings.");
+        if self.agent_choice() == Choice::None {
+            self.assistant_choose_prompt("Choose the agent to talk to first.");
             return;
         }
         self.assistant.input.set_text("");
@@ -311,6 +559,16 @@ impl Workbench {
 
     /// Handles what the agent sent. Called every frame.
     pub(super) fn assistant_tick(&mut self) {
+        while let Ok((id, probe)) = self.assistant.probe_rx.try_recv() {
+            self.assistant.probing.remove(id);
+            self.assistant.probes.insert(id, probe);
+            // Checked after Use or an install: say what's still missing.
+            if let (Choice::Builtin(a), true) = (self.agent_choice(), self.assistant.client.is_none()) {
+                if a.id == id && !self.assistant.entries.iter().any(|e| matches!(e, Entry::Action(..))) && !self.assistant.entries.is_empty() {
+                    self.agent_ready(a);
+                }
+            }
+        }
         if self.assistant.client.is_none() {
             return;
         }
@@ -325,20 +583,50 @@ impl Workbench {
                 }
                 Incoming::Notification { .. } => {}
                 Incoming::Request { id, method, params } => self.assistant_request(id, &method, &params),
-                Incoming::Log(line) => self.output.append(OUTPUT_CHANNEL, &format!("{line}\n")),
+                Incoming::Log(line) => {
+                    self.output.append(OUTPUT_CHANNEL, &format!("{line}\n"));
+                    let recent = &mut self.assistant.recent_log;
+                    if !line.trim().is_empty() {
+                        recent.push_back(line);
+                        if recent.len() > RECENT_LOG {
+                            recent.pop_front();
+                        }
+                    }
+                }
                 Incoming::Exited => {
-                    let starting = self.assistant.phase == Phase::Starting;
+                    let starting = self.assistant.phase == Phase::Starting && self.assistant.init_req.is_some();
                     self.assistant_stop();
-                    let message = if starting {
-                        "The agent exited while starting. The Output panel's Assistant channel shows what it printed."
+                    if starting {
+                        self.agent_exited_starting();
                     } else {
-                        "The agent exited. Send a message to start it again."
-                    };
-                    self.assistant_notice(message);
+                        self.assistant_notice("The agent exited. Send a message to start it again.");
+                    }
                     return;
                 }
             }
         }
+    }
+
+    /// A custom agent ended before answering `initialize`: most likely a program that doesn't
+    /// speak the protocol (an agent's interactive tool), so say so and offer the agents we know.
+    fn agent_exited_starting(&mut self) {
+        let command = match self.agent_choice() {
+            Choice::Custom(c) => c,
+            _ => String::new(),
+        };
+        let program = Choice::Custom(command.clone()).label();
+        let mut text = format!("`{program}` stopped before answering, so it doesn't seem to speak the Agent Client Protocol.");
+        let printed: Vec<String> = self.assistant.recent_log.iter().cloned().collect();
+        if !printed.is_empty() {
+            text.push_str(&format!(" It printed:\n{}", printed.join("\n")));
+        }
+        let mut actions = Vec::new();
+        if let Some(a) = agents::AGENTS.iter().find(|a| a.program == program) {
+            text.push_str(&format!("\n{} is built in: use it instead.", a.name));
+            actions.push((format!("Use {}", a.name), AgentAction::Use(a.id)));
+        }
+        actions.push(("Choose Agent".into(), AgentAction::Choose));
+        self.assistant_action(text, actions);
     }
 
     fn assistant_response(&mut self, id: i64, result: Result<Value, (i64, String)>) {
@@ -629,7 +917,7 @@ impl Workbench {
     pub(super) fn draw_assistant(&mut self, c: &mut Canvas, r: Rect) {
         let fg = self.color_or("sideBar.foreground", "foreground");
         let dim = self.color("descriptionForeground");
-        if self.agent_command().is_empty() && self.assistant.entries.is_empty() {
+        if self.agent_choice() == Choice::None && self.assistant.entries.is_empty() {
             return self.draw_assistant_setup(c, r, fg, dim);
         }
         let (body, footer) = r.cut_bottom(INPUT_H + 40.0);
@@ -637,30 +925,55 @@ impl Workbench {
         self.draw_assistant_input(c, footer, fg, dim);
     }
 
+    /// No agent yet: the agents we know, each with what it needs, and a custom command.
     fn draw_assistant_setup(&mut self, c: &mut Canvas, r: Rect, fg: Color, dim: Color) {
-        let style = TextStyle::ui(UI, fg);
+        self.assistant_probe_all();
         let mut y = r.y + 16.0;
         let w = r.w - 2.0 * PAD;
+        let x = r.x + PAD;
         let head = TextStyle::ui(14.0, fg).weight(600);
-        c.text(r.x + PAD, y, "Bring your coding agent", &head);
+        c.text(x, y, "Choose your coding agent", &head);
         y += 26.0;
-        let text = "The Assistant talks to a coding agent of your choice: any program that speaks the Agent Client Protocol. \
-                    It works in this folder, reads and edits files through the editor (unsaved changes included), asks before it changes \
-                    anything or runs a command, and can ask the language servers about your code. Nothing is sent anywhere until you set an agent up.";
-        for line in super::intel::wrap(c, text, &TextStyle::ui(UI, dim), w) {
-            c.text(r.x + PAD, y, &line, &TextStyle::ui(UI, dim));
+        let text = "The Assistant works with a coding agent in this folder. It reads and edits files through the editor (unsaved changes included), \
+                    asks before it changes anything or runs a command, and can ask the language servers about your code.";
+        let body = TextStyle::ui(UI, dim);
+        for line in super::intel::wrap(c, text, &body, w) {
+            c.text(x, y, &line, &body);
             y += 18.0;
         }
         y += 12.0;
-        let button = Rect::new(r.x + PAD, y, w.min(220.0), 28.0);
-        let bg = if self.hovered(Hit::AssistantSettings) { self.color("button.hoverBackground") } else { self.color("button.background") };
-        c.fill_rounded(button, bg, 6.0);
-        let label = "Set Up an Agent";
-        let bst = TextStyle::ui(UI, self.color("button.foreground"));
-        let lw = c.measure(label, &bst);
-        c.text_in(Rect::new(button.x + (button.w - lw) / 2.0, button.y, lw + 2.0, button.h), label, &bst);
-        self.hits.push((button, Hit::AssistantSettings));
-        let _ = style;
+        let name_st = TextStyle::ui(UI, fg).weight(600);
+        let small = TextStyle::ui(SMALL, dim);
+        for (i, a) in agents::AGENTS.iter().enumerate() {
+            // The name and button on top, then what it is and what its tool needs.
+            let about = super::intel::wrap(c, a.about, &small, w - 24.0);
+            let card = Rect::new(x, y, w, 50.0 + 16.0 * about.len() as f32 + 20.0);
+            c.bordered(card, self.color("editorWidget.background"), self.color("widget.border"), 1.0, 8.0);
+            let (status, action) = self.agent_status(a);
+            let label = match action {
+                AgentAction::Install(_) => "Install",
+                AgentAction::SignIn(_) => "Sign In",
+                _ => "Use",
+            };
+            let button = Rect::new(card.right() - 10.0 - 76.0, y + 10.0, 76.0, 26.0);
+            self.option_button(c, button, label, true, Hit::AssistantAgent(i as u8));
+            c.text_fit(Rect::new(x + 12.0, y + 13.0, button.x - x - 20.0, 20.0), a.name, &name_st);
+            let mut ly = y + 46.0;
+            for line in &about {
+                c.text(x + 12.0, ly, line, &small);
+                ly += 16.0;
+            }
+            let status_st = TextStyle::ui(SMALL, if matches!(action, AgentAction::Use(_)) { dim } else { self.color("editorWarning.foreground") });
+            c.text_fit(Rect::new(x + 12.0, ly + 2.0, card.w - 24.0, 16.0), &status, &status_st);
+            y += card.h + 10.0;
+        }
+        y += 4.0;
+        let link = TextStyle::ui(UI, self.color("textLink.foreground"));
+        let label = "Use another agent with a custom command…";
+        let lw = c.measure(label, &link).min(w);
+        let rect = Rect::new(x, y, lw, 20.0);
+        c.text_fit(rect, label, &link);
+        self.hits.push((rect, Hit::AssistantCustomAgent));
     }
 
     /// One entry's lines and look, for layout: (text, style, indent, background).
@@ -724,6 +1037,7 @@ impl Workbench {
             }
             Entry::Auth(_) => wrap(c, "The agent needs you to sign in:", &ui, w - 20.0),
             Entry::Notice(t) => wrap(c, t, &small, w),
+            Entry::Action(t, _) => t.split('\n').flat_map(|l| wrap(c, l, &ui, w - 20.0)).collect(),
         }
     }
 
@@ -756,6 +1070,7 @@ impl Workbench {
                 Entry::Tool(t) => 10.0 + if t.content.iter().any(|c| matches!(c, ToolContent::Diff(_))) { 26.0 } else { 0.0 },
                 Entry::Permission(p) => 20.0 + 32.0 * p.options.len().div_ceil(2).max(1) as f32 + if p.diffs.is_empty() { 0.0 } else { 30.0 },
                 Entry::Auth(m) => 20.0 + 32.0 * m.len() as f32,
+                Entry::Action(_, actions) => 20.0 + 32.0 * actions.len() as f32,
                 Entry::Plan(_) => 12.0,
                 _ => 4.0,
             };
@@ -867,6 +1182,15 @@ impl Workbench {
                 Entry::Notice(_) => {
                     draw_lines(c, x, y0, &lines);
                 }
+                Entry::Action(_, actions) => {
+                    let card = Rect::new(x, y0, w, h);
+                    c.bordered(card, self.color("editorWidget.background"), self.color("focusBorder"), 1.0, 8.0);
+                    let y = draw_lines(c, x + 10.0, y0 + 8.0, &lines) + 6.0;
+                    for (k, (label, _)) in actions.iter().enumerate() {
+                        let b = Rect::new(x + 10.0, y + k as f32 * 32.0, w - 20.0, 26.0);
+                        self.option_button(c, b, label, k == 0, Hit::AssistantAction(i, k));
+                    }
+                }
             }
         }
         c.pop_clip();
@@ -897,27 +1221,37 @@ impl Workbench {
 
     fn draw_assistant_input(&mut self, c: &mut Canvas, r: Rect, fg: Color, dim: Color) {
         c.fill(Rect::new(r.x, r.y, r.w, 1.0), self.color("sideBarSectionHeader.border"));
+        let chip_y = r.y + 6.0;
+        // New chat at the right, the agent menu before it.
+        let new_chat = Rect::new(r.right() - PAD - 22.0, chip_y - 1.0, 22.0, 22.0);
+        self.icon_button(c, new_chat, &icons::ADD, Hit::AssistantNewChat, dim);
+        let agent = self.agent_choice().label();
+        let st = TextStyle::ui(SMALL, dim);
+        let aw = (c.measure(&agent, &st) + 26.0).min(r.w * 0.5);
+        let menu = Rect::new(new_chat.x - 6.0 - aw, chip_y, aw, 20.0);
+        if self.hovered(Hit::AssistantAgentMenu) {
+            c.fill_rounded(menu, self.color("toolbar.hoverBackground"), 5.0);
+        }
+        c.text_fit(Rect::new(menu.x + 6.0, menu.y, menu.w - 24.0, menu.h), &agent, &st);
+        c.icon(&icons::CHEVRON_DOWN, menu.right() - 17.0, menu.y + 4.0, 12.0, dim);
+        self.assistant.menu_at = (menu.x, menu.bottom() + 2.0);
+        self.hits.push((menu, Hit::AssistantAgentMenu));
         // Context chips: the active file (click to leave it out of the next message).
         let file = self.active_doc().and_then(|d| d.buffer.path()).and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
-        let chip_y = r.y + 6.0;
-        let mut x = r.x + PAD;
-        if let Some(file) = file.filter(|_| self.settings.bool("assistant.sendActiveFile")) {
+        let x = r.x + PAD;
+        let room = menu.x - 8.0 - x;
+        if let Some(file) = file.filter(|_| self.settings.bool("assistant.sendActiveFile") && room > 50.0) {
             let on = self.assistant.send_file;
             let st = TextStyle::ui(SMALL, if on { self.color("textLink.foreground") } else { dim });
             let sel = self.active_editor().is_some_and(|e| !e.sel.is_empty());
             let label = if sel { format!("{file} · selection") } else { file };
             let cw = c.measure(&label, &st) + 30.0;
-            let chip = Rect::new(x, chip_y, cw.min(r.w - 2.0 * PAD - 70.0), 20.0);
+            let chip = Rect::new(x, chip_y, cw.min(room), 20.0);
             c.bordered(chip, Color::TRANSPARENT, if on { self.color("focusBorder").with_alpha(0.5) } else { self.color("widget.border") }, 1.0, 10.0);
             c.icon(&icons::FILE, chip.x + 7.0, chip.y + 3.0, 13.0, if on { self.color("textLink.foreground") } else { dim });
             c.text_fit(Rect::new(chip.x + 24.0, chip.y, chip.w - 28.0, chip.h), &label, &st);
             self.hits.push((chip, Hit::AssistantChip));
-            x = chip.right() + 6.0;
         }
-        let _ = x;
-        // New chat, right of the chips.
-        let new_chat = Rect::new(r.right() - PAD - 22.0, chip_y - 1.0, 22.0, 22.0);
-        self.icon_button(c, new_chat, &icons::ADD, Hit::AssistantNewChat, dim);
 
         let field = Rect::new(r.x + PAD, r.bottom() - INPUT_H - 8.0, r.w - 2.0 * PAD - 36.0, INPUT_H);
         let focused = self.focus == Focus::Assistant;
@@ -1034,7 +1368,7 @@ mod agent_tests {
         std::fs::write(&agent, include_str!("../../testdata/fake_acp.py")).unwrap();
         std::fs::set_permissions(&agent, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         let command = serde_json::to_string(&agent.to_string_lossy()).unwrap();
-        std::fs::write(dir.join(".orbvane/settings.json"), format!("{{ \"assistant.agent.command\": {command} }}")).unwrap();
+        std::fs::write(dir.join(".orbvane/settings.json"), format!("{{ \"assistant.agent\": \"custom\", \"assistant.agent.command\": {command} }}")).unwrap();
         // SAFETY: every test that reads this wants the same scratch user data folder.
         unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
         let mut wb = Workbench::new(Some(dir.clone()), &[file.clone()], std::sync::Arc::new(|| {}));
@@ -1118,6 +1452,66 @@ mod agent_tests {
 
         wb.shutdown();
         assert!(wb.assistant.client.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn workbench(name: &str, settings: &str) -> (Workbench, std::path::PathBuf) {
+        let dir = std::env::temp_dir().join(format!("orbvane-agents-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".orbvane")).unwrap();
+        std::fs::write(dir.join(".orbvane/settings.json"), settings).unwrap();
+        // SAFETY: every test that reads this wants the same scratch user data folder.
+        unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+        (Workbench::new(Some(dir.clone()), &[], std::sync::Arc::new(|| {})), dir)
+    }
+
+    /// No agent yet: the setup screen lists the agents, with the button their tools call for.
+    #[test]
+    fn the_setup_screen_offers_the_agents() {
+        let (mut wb, dir) = workbench("setup", "{}");
+        let Ok(mut r) = render::Renderer::offscreen((1200, 760), 1.0) else { return };
+        let claude = agents::find("claude-code").unwrap();
+        let codex = agents::find("codex").unwrap();
+        wb.assistant.probes.insert(claude.id, Probe { path: Some("/x/claude".into()), version: "2.1".into(), signed_in: true });
+        wb.assistant.probes.insert(codex.id, Probe::default());
+        wb.run(crate::commands::Command::AssistantFocus);
+        r.frame(wb.background(), |c| wb.draw(c));
+        for i in 0..agents::AGENTS.len() {
+            assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantAgent(i as u8)));
+        }
+        assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantCustomAgent));
+        assert_eq!(wb.agent_setup_action(claude), AgentAction::Use("claude-code"));
+        assert_eq!(wb.agent_setup_action(codex), AgentAction::Install("codex"));
+        // A tool that's installed but signed out needs a sign-in, which Use says.
+        wb.assistant.probes.insert(codex.id, Probe { path: Some("/x/codex".into()), version: "1".into(), signed_in: false });
+        assert_eq!(wb.agent_setup_action(codex), AgentAction::SignIn("codex"));
+        // (Saved in the workspace: the user settings are shared by the tests.)
+        wb.use_agent("codex", settings::Scope::Workspace);
+        assert_eq!(wb.agent_choice(), Choice::Builtin(codex));
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Action(_, a)) if a[0].1 == AgentAction::SignIn("codex")));
+        // The picker lists both agents and a custom command.
+        wb.run(crate::commands::Command::AssistantSelectAgent);
+        let labels: Vec<String> = wb.palette.as_ref().unwrap().picker.as_ref().unwrap().choices.iter().map(|i| i.label.clone()).collect();
+        assert_eq!(labels, ["Claude Code", "Codex (current)", "Custom Command…"]);
+        wb.palette = None;
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A custom command that isn't an agent (it exits at once): the transcript says so, quotes
+    /// what it printed and offers the agents.
+    #[test]
+    fn a_command_that_is_not_an_agent() {
+        let (mut wb, dir) = workbench("not-an-agent", r#"{ "assistant.agent": "custom", "assistant.agent.command": "sh -c 'echo usage: no terminal >&2'" }"#);
+        assert_eq!(wb.agent_choice().label(), "sh");
+        let mut r = None;
+        type_and_send(&mut wb, "hello");
+        until(&mut wb, &mut r, "the agent's exit", |wb| wb.assistant.client.is_none() && wb.assistant.entries.iter().any(|e| matches!(e, Entry::Action(..))));
+        let Some(Entry::Action(text, actions)) = wb.assistant.entries.last() else { panic!("{:?}", wb.assistant.entries) };
+        assert!(text.contains("doesn't seem to speak the Agent Client Protocol"), "{text}");
+        assert!(text.contains("usage: no terminal"), "{text}");
+        assert_eq!(actions.last().map(|a| &a.1), Some(&AgentAction::Choose));
+        wb.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

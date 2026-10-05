@@ -3,6 +3,7 @@
 //! This file is the platform layer: the native macOS window and menu bar, and translation of
 //! winit events into workbench input.
 
+mod agents;
 mod brackets;
 mod colors;
 mod commands;

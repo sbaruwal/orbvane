@@ -80,6 +80,7 @@ mod updates;
 mod watching;
 mod workspaces;
 
+pub(crate) use assistant::AgentAction;
 pub use debug::DebugPick;
 pub use git_actions::{GitInput, GitPick};
 pub use session::window_bounds;
@@ -362,15 +363,19 @@ enum Hit {
     AuxTab(u8),
     AuxClose,
     AuxSash,
-    /// The Assistant: Set Up an Agent, the transcript, Review on entry (entry, diff),
-    /// a permission option (entry, option), a sign-in method (entry, method), the active
-    /// file chip, New Chat, the message box, Stop and Send.
-    AssistantSettings,
+    /// The Assistant: the setup screen's button for agent i and its custom command link, the
+    /// transcript, Review on entry (entry, diff), a permission option (entry, option), a
+    /// sign-in method (entry, method), a button of an `Entry::Action` (entry, button), the
+    /// active file chip, the agent menu, New Chat, the message box, Stop and Send.
+    AssistantAgent(u8),
+    AssistantCustomAgent,
     AssistantBody,
     AssistantReview(usize, usize),
     AssistantOption(usize, usize),
     AssistantAuth(usize, usize),
+    AssistantAction(usize, usize),
     AssistantChip,
+    AssistantAgentMenu,
     AssistantNewChat,
     AssistantInput,
     AssistantStop,
@@ -1229,6 +1234,7 @@ impl Workbench {
                 self.show_aux(aux_bar::AuxTab::Assistant);
                 self.focus = Focus::Assistant;
             }
+            Command::AssistantSelectAgent => self.assistant_select_agent(),
             Command::ToggleTerminal => self.toggle_terminal(),
             Command::NewTerminal => self.new_terminal(),
             Command::KillTerminal => self.kill_terminal(),
@@ -1681,6 +1687,7 @@ impl Workbench {
             Action::Debug(pick) => self.debug_pick(pick),
             Action::CompareWith(path) => self.compare_paths(path, None),
             Action::Language(lang) => self.set_language(lang),
+            Action::Agent(action) => self.agent_action(action),
             Action::ExtPick(i) => self.ext_answer(serde_json::json!(i)),
             Action::Task(label) => {
                 self.run_task(&label);
@@ -2262,10 +2269,21 @@ impl Workbench {
             Hit::AuxTab(i) => self.aux.tab = aux_bar::AuxTab::ALL[i as usize],
             Hit::AuxClose => self.run(Command::ToggleAuxiliaryBar),
             Hit::AuxSash => self.drag = Some(Drag::AuxSash),
-            Hit::AssistantSettings => {
-                self.open_settings_ui();
-                self.settings_ui.search.set_text("assistant");
+            Hit::AssistantAgent(i) => {
+                if let Some(a) = crate::agents::AGENTS.get(i as usize) {
+                    let action = self.agent_setup_action(a);
+                    self.agent_action(action);
+                }
             }
+            Hit::AssistantCustomAgent => self.agent_action(AgentAction::Custom),
+            Hit::AssistantAction(e, k) => {
+                if let Some(assistant::Entry::Action(_, actions)) = self.assistant.entries.get(e) {
+                    if let Some((_, action)) = actions.get(k).cloned() {
+                        self.agent_action(action);
+                    }
+                }
+            }
+            Hit::AssistantAgentMenu => self.assistant_agent_menu(),
             Hit::AssistantBody => {}
             Hit::AssistantReview(e, d) => self.assistant_review(e, d),
             Hit::AssistantOption(e, o) => self.assistant_answer(e, o),
@@ -2569,7 +2587,7 @@ impl Workbench {
             Some(Hit::OutlineRow(_) | Hit::OutlineTwistie(_) | Hit::OutlineBody) => self.outline_scroll(dy),
             Some(Hit::DebugBody(i) | Hit::DebugRow(i, _) | Hit::DebugRowAction(i, _, _)) => self.debug_scroll(i, dy),
             Some(Hit::DebugConsoleBody) => self.debug_console_scroll(dy),
-            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantOption(..) | Hit::AssistantAuth(..)) => self.assistant_scroll(dy),
+            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantOption(..) | Hit::AssistantAuth(..) | Hit::AssistantAction(..)) => self.assistant_scroll(dy),
             Some(Hit::PeekRow(_) | Hit::PeekBody | Hit::PeekTwistie(_)) => self.peek_scroll(dy),
             Some(Hit::Image(g)) => {
                 let gr = &mut self.groups[g];

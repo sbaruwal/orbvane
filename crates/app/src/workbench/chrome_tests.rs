@@ -88,7 +88,7 @@ fn secondary_side_bar() {
     assert!(wb.aux.visible);
     let (bx, _) = spot(&wb, Hit::AuxBody);
     assert!(bx > 1100.0 - wb.aux.width, "{bx}");
-    assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantSettings));
+    assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantAgent(0)));
     // The editors end where it starts.
     let editor = wb.hits.iter().find(|(_, h)| matches!(h, Hit::Editor(_))).map(|(r, _)| *r).unwrap();
     assert!(editor.right() <= 1100.0 - wb.aux.width + 1.0, "{editor:?}");

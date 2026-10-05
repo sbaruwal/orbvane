@@ -287,6 +287,9 @@ impl Workbench {
     /// when the task failed, asks what to do). Called every frame.
     pub(super) fn tasks_tick(&mut self) {
         for (label, code) in self.finished_tasks() {
+            if self.assistant_task_done(&label, code) {
+                continue;
+            }
             match self.installing.remove(&label) {
                 Some(command) => self.server_install_done(command, code),
                 None => self.debug_pre_launch_done(&label, code),

@@ -47,6 +47,8 @@ pub(crate) enum PopupAction {
     Extension(String, super::extensions_view::ExtMenu),
     /// Run a command (an extension's, from its menus) with these arguments.
     ExtCommand(String, Vec<Value>),
+    /// The Assistant's agent menu.
+    Agent(super::AgentAction),
     /// The entry is a submenu with these entries.
     Submenu(Vec<(PopupItem, PopupAction)>),
 }
@@ -267,6 +269,7 @@ impl Workbench {
             PopupAction::ProblemsToggle(t) => self.problems_toggle(t),
             PopupAction::Test(key, action) => self.test_popup(key, action),
             PopupAction::OutputChannel(name) => self.show_output_channel(&name, false),
+            PopupAction::Agent(action) => self.agent_action(action),
             PopupAction::Extension(id, action) => self.extension_menu_action(&id, action),
             PopupAction::ExtCommand(command, args) => self.ext_execute(&command, args, None),
             PopupAction::SetValue(scope, key, value) => {

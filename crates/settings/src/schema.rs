@@ -753,11 +753,23 @@ fn builtin() -> Vec<Setting> {
                 description: "How many minutes a language server has to be idle before it stops (see Stop When Idle).",
             },
             Setting {
+                key: "assistant.agent",
+                default: "\"none\"",
+                kind: Kind::Enum(&[
+                    ("none", "No agent: the Assistant shows the agents to choose from."),
+                    ("claude-code", "Claude Code, through its `claude` command line tool."),
+                    ("codex", "Codex, through its `codex` command line tool."),
+                    ("custom", "Any agent that speaks the Agent Client Protocol, started with Agent Command."),
+                ]),
+                section: Section::Assistant,
+                description: "The coding agent the Assistant talks to. Claude Code and Codex need their command line tools installed and signed in; the Assistant offers to do both.",
+            },
+            Setting {
                 key: "assistant.agent.command",
                 default: "\"\"",
                 kind: Kind::String,
                 section: Section::Assistant,
-                description: "The command line that starts the coding agent the Assistant talks to: any agent that speaks the Agent Client Protocol over its standard input and output. It runs through your login shell in the open folder. Empty: no agent.",
+                description: "With Agent set to custom: the command line that starts an agent that speaks the Agent Client Protocol over its standard input and output. It runs through your login shell in the open folder.",
             },
             Setting {
                 key: "assistant.sendActiveFile",
