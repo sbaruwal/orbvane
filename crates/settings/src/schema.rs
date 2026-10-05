@@ -772,6 +772,13 @@ fn builtin() -> Vec<Setting> {
                 description: "With Agent set to custom: the command line that starts an agent that speaks the Agent Client Protocol over its standard input and output. It runs through your login shell in the open folder.",
             },
             Setting {
+                key: "assistant.saveBeforeSending",
+                default: "true",
+                kind: Kind::Bool,
+                section: Section::Assistant,
+                description: "Controls whether files in the folder with unsaved changes are saved before each message to Claude Code or Codex, which read files from disk (other agents read them through the editor, unsaved changes included).",
+            },
+            Setting {
                 key: "assistant.sendActiveFile",
                 default: "true",
                 kind: Kind::Bool,

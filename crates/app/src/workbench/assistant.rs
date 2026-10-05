@@ -140,6 +140,8 @@ pub(super) struct Assistant {
     recent_log: VecDeque<String>,
     /// Where the agent menu opens (below its button).
     menu_at: (f32, f32),
+    /// Tests: the shell command that stands in for a built-in agent's tool (`codex app-server`).
+    pub server_override: Option<String>,
 }
 
 impl Default for Assistant {
@@ -173,6 +175,7 @@ impl Default for Assistant {
             tasks: HashMap::new(),
             recent_log: VecDeque::new(),
             menu_at: (0.0, 0.0),
+            server_override: None,
         }
     }
 }
@@ -227,8 +230,38 @@ impl Workbench {
             self.assistant.queued = None;
             return;
         }
-        self.assistant.queued = None;
-        self.assistant_notice(format!("Orbvane can't talk to {} yet: support for it is on its way.", a.name));
+        match a.id {
+            "codex" => self.start_codex(),
+            _ => {
+                self.assistant.queued = None;
+                self.assistant_notice(format!("Orbvane can't talk to {} yet: support for it is on its way.", a.name));
+            }
+        }
+    }
+
+    /// Codex through our bridge (`acp::codex`), which runs `codex app-server`.
+    fn start_codex(&mut self) {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let command = self.assistant.server_override.clone().unwrap_or_else(|| "exec codex app-server".into());
+        let cwd = self.agent_cwd();
+        let options = acp::codex::Options { program: shell, args: vec!["-l".into(), "-c".into(), command], cwd: cwd.clone(), env: self.mcp_env() };
+        match Client::in_process("codex", self.waker.clone(), move |rx, tx, log| acp::codex::serve(options, rx, tx, log)) {
+            Ok(client) => self.agent_started(client, Choice::Builtin(agents::find("codex").unwrap()), cwd),
+            Err(e) => self.assistant_notice(format!("Couldn't start Codex: {e}")),
+        }
+    }
+
+    /// An agent is running: it gets `initialize`.
+    fn agent_started(&mut self, mut client: Client, choice: Choice, cwd: PathBuf) {
+        let a = &mut self.assistant;
+        a.init_req = Some(client.initialize("orbvane", env!("CARGO_PKG_VERSION")));
+        a.client = Some(client);
+        a.phase = Phase::Starting;
+        a.started = Some(Instant::now());
+        a.cwd = Some(cwd);
+        a.command = choice.key();
+        a.recent_log.clear();
+        self.output.append(OUTPUT_CHANNEL, &format!("Starting {}\n", choice.label()));
     }
 
     /// Whether `a`'s tool is installed and signed in, as far as the last check knows; if
@@ -253,23 +286,13 @@ impl Workbench {
 
     /// An Agent Client Protocol agent started with `command` through the login shell.
     fn start_custom_agent(&mut self, command: &str) {
-        let key = Choice::Custom(command.to_string()).key();
         let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
         // The login shell finds the agent the way a terminal would; exec so it gets the signals.
         let args = vec!["-l".to_string(), "-c".to_string(), format!("exec {command}")];
         let cwd = self.agent_cwd();
         let env = self.mcp_env();
         match Client::spawn(&shell, &args, &cwd, &env, self.waker.clone()) {
-            Ok(mut client) => {
-                self.assistant.init_req = Some(client.initialize("orbvane", env!("CARGO_PKG_VERSION")));
-                self.assistant.client = Some(client);
-                self.assistant.phase = Phase::Starting;
-                self.assistant.started = Some(Instant::now());
-                self.assistant.cwd = Some(cwd);
-                self.assistant.command = key;
-                self.assistant.recent_log.clear();
-                self.output.append(OUTPUT_CHANNEL, &format!("Starting {command}\n"));
-            }
+            Ok(client) => self.agent_started(client, Choice::Custom(command.to_string()), cwd),
             Err(e) => self.assistant_notice(format!("Couldn't start the agent ({command}): {e}")),
         }
     }
@@ -512,6 +535,9 @@ impl Workbench {
             self.assistant_choose_prompt("Choose the agent to talk to first.");
             return;
         }
+        if matches!(self.agent_choice(), Choice::Builtin(_)) && self.settings.bool("assistant.saveBeforeSending") {
+            self.save_for_agent();
+        }
         self.assistant.input.set_text("");
         self.assistant.entries.push(Entry::User(text.clone()));
         self.assistant.scroll = 0.0;
@@ -521,6 +547,18 @@ impl Workbench {
         } else {
             self.assistant.queued = Some(prompt);
             self.assistant_start();
+        }
+    }
+
+    /// Saves the documents in the agent's folder that have unsaved changes: built-in agents read
+    /// files from disk.
+    fn save_for_agent(&mut self) {
+        let cwd = self.agent_cwd();
+        let dirty: Vec<usize> = (0..self.docs.len())
+            .filter(|&i| self.docs[i].as_ref().is_some_and(|d| d.buffer.is_dirty() && d.buffer.path().is_some_and(|p| p.starts_with(&cwd))))
+            .collect();
+        for id in dirty {
+            self.save_doc_quietly(id);
         }
     }
 
@@ -596,8 +634,15 @@ impl Workbench {
                 Incoming::Exited => {
                     let starting = self.assistant.phase == Phase::Starting && self.assistant.init_req.is_some();
                     self.assistant_stop();
-                    if starting {
+                    if starting && matches!(self.agent_choice(), Choice::Custom(_)) {
                         self.agent_exited_starting();
+                    } else if starting {
+                        let printed: Vec<String> = self.assistant.recent_log.iter().cloned().collect();
+                        let mut text = format!("{} stopped while starting.", self.agent_choice().label());
+                        if !printed.is_empty() {
+                            text.push_str(&format!(" It printed:\n{}", printed.join("\n")));
+                        }
+                        self.assistant_notice(text);
                     } else {
                         self.assistant_notice("The agent exited. Send a message to start it again.");
                     }
@@ -669,10 +714,17 @@ impl Workbench {
                     self.assistant.entries.push(Entry::Auth(methods));
                     let _ = e;
                 }
-                Err((_, e)) => {
+                Err((code, e)) => {
                     a.phase = Phase::Ready;
                     a.queued = None;
-                    self.assistant_notice(format!("The agent couldn't start a session: {e}"));
+                    match self.agent_choice() {
+                        // One of ours that isn't signed in: the button signs in.
+                        Choice::Builtin(agent) if code == AUTH_REQUIRED => {
+                            self.assistant.probes.remove(agent.id);
+                            self.assistant_action(e, vec![("Sign In".into(), AgentAction::SignIn(agent.id))]);
+                        }
+                        _ => self.assistant_notice(format!("The agent couldn't start a session: {e}")),
+                    }
                 }
             }
         } else if Some(id) == a.auth_req {
@@ -1494,6 +1546,66 @@ mod agent_tests {
         let labels: Vec<String> = wb.palette.as_ref().unwrap().picker.as_ref().unwrap().choices.iter().map(|i| i.label.clone()).collect();
         assert_eq!(labels, ["Claude Code", "Codex (current)", "Custom Command…"]);
         wb.palette = None;
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Codex through the bridge, with `testdata/fake_codex.py` standing in for `codex
+    /// app-server`: unsaved changes are saved first, the reply streams with the model the
+    /// account offers (the configured one isn't), the file change is a permission question
+    /// with its diff and lands on disk when allowed, a failed turn shows Codex's message, and
+    /// Stop interrupts the turn.
+    #[test]
+    fn a_conversation_with_codex() {
+        let (mut wb, dir) = workbench("codex", r#"{ "assistant.agent": "codex" }"#);
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let fake = dir.join("fake_codex.py");
+        std::fs::write(&fake, include_str!("../../testdata/fake_codex.py")).unwrap();
+        wb.assistant.server_override = Some(format!("exec python3 {}", fake.display()));
+        wb.assistant.probes.insert("codex", Probe { path: Some("/x/codex".into()), version: "1".into(), signed_in: true });
+        wb.open_file(&file);
+        let id = wb.active_editor().unwrap().doc;
+        let end = wb.docs[id].as_ref().unwrap().buffer.pos_of(11);
+        wb.edit_doc(id, vec![(end, end, "!".into())], false);
+        assert!(wb.docs[id].as_ref().unwrap().buffer.is_dirty());
+        let mut r = None;
+
+        type_and_send(&mut wb, "make it polite");
+        // Saved first, since Codex reads the file from disk.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world!\n");
+        until(&mut wb, &mut r, "the permission request", |wb| wb.assistant.entries.iter().any(|e| matches!(e, Entry::Permission(_))));
+        let (i, p) = wb.assistant.entries.iter().enumerate().find_map(|(i, e)| if let Entry::Permission(p) = e { Some((i, p.clone())) } else { None }).unwrap();
+        assert_eq!(p.title, "Edit notes.txt");
+        assert_eq!(p.diffs.len(), 1);
+        assert_eq!(p.diffs[0].new_text, "goodbye world!\n");
+        assert_eq!(p.options.iter().map(|o| o.1.as_str()).collect::<Vec<_>>(), ["Allow", "Allow These Files for This Chat", "Reject"]);
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t == "Using model=m1")), "{:#?}", wb.assistant.entries);
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Thought(t) if t.contains("retired-model") && t.contains("Model One"))));
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Plan(p) if p.len() == 2 && p[1].status == "in_progress")));
+        assert_eq!(wb.assistant.agent_name, "Codex");
+        wb.assistant_answer(i, 0);
+        until(&mut wb, &mut r, "the end of the turn", |wb| wb.assistant.phase == Phase::Ready);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world!\n");
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Run `ls -1`" && t.status == "completed")));
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")));
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Agent(t)) if t.ends_with("\n\nDone.")), "{:#?}", wb.assistant.entries.last());
+        // The editor tools went to Codex's config.
+        assert!(wb.output.lines("Assistant").iter().any(|l| l == "mcp servers: ['orbvane']"), "{:?}", wb.output.lines("Assistant"));
+
+        // A failed turn: Codex's own message.
+        wb.assistant.send_file = false;
+        type_and_send(&mut wb, "fail now");
+        until(&mut wb, &mut r, "the failure", |wb| wb.assistant.phase == Phase::Ready && matches!(wb.assistant.entries.last(), Some(Entry::Notice(_))));
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Notice(n)) if n == "The agent reported an error: Model is unavailable."));
+
+        // Stop interrupts the turn.
+        type_and_send(&mut wb, "wait for me");
+        until(&mut wb, &mut r, "the turn to start", |wb| wb.assistant.phase == Phase::Working);
+        std::thread::sleep(Duration::from_millis(200));
+        wb.assistant_cancel();
+        until(&mut wb, &mut r, "the stop", |wb| wb.assistant.phase == Phase::Ready);
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Notice(n)) if n == "Stopped."));
         wb.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

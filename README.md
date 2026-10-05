@@ -230,18 +230,26 @@ show their message after the failing line, and Test Results has the output.
 
 <br>
 
-The Assistant (⇧⌘I) is a chat with any coding agent that speaks the
-[Agent Client Protocol](https://agentclientprotocol.com). Set the command that starts it in
-Settings (`assistant.agent.command`); it runs through your login shell, in the open folder.
+The Assistant (⇧⌘I) is a chat with a coding agent, working in the open folder. Pick the agent
+when you first open it, or later from the menu next to New Chat (or **Assistant: Select Agent**):
+
+- **Codex:** Orbvane talks to the `codex` command line tool directly, with no adapter to
+  install. If it isn't installed or signed in, the Assistant offers to do that in a terminal.
+- **Any other agent** that speaks the [Agent Client Protocol](https://agentclientprotocol.com):
+  give the command that starts it (**Custom Command…**). It runs through your login shell.
+
+In the chat:
 
 - The current file and selection go with each message. Click the file's chip to leave it out.
 - Replies stream in with the agent's thoughts, plan and tool calls.
-- The agent reads files through the editor, unsaved changes included. Its edits land as one undo
-  step.
 - Before it changes a file or runs a command, it asks you. **Review Changes** shows the proposed
   edit as a diff.
 - **Editor tools:** the agent can ask Orbvane's language servers for definitions, references,
   hovers and symbols, and read the Problems list (`assistant.editorTools`).
+- Agents that speak the protocol read files through the editor, unsaved changes included, and
+  their edits land as one undo step. Codex reads and writes files on disk, so files with unsaved
+  changes are saved before each message (`assistant.saveBeforeSending`), and open files reload
+  when it changes them.
 
 </details>
 
@@ -459,7 +467,7 @@ Crates are used only for the low-level pieces: `winit` (window and events), `wgp
 
 | Crate | Purpose |
 |---|---|
-| `acp` | Agent Client Protocol client for the Assistant; `mcp`: the editor's tools as a Model Context Protocol server |
+| `acp` | Agent Client Protocol client for the Assistant; `codex`: Codex's app server behind that protocol; `mcp`: the editor's tools as a Model Context Protocol server |
 | `app` | Platform layer (`main.rs`) and the workbench: everything drawn |
 | `cargo-orbvane` | `cargo orbvane package` (extensions to `.vsix`) and `cargo orbvane registry` (the registry's CI) |
 | `css` | CSS, SCSS and Less language server |
