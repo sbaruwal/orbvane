@@ -19,6 +19,7 @@ use crate::input::{Key, KeyInput};
 use crate::palette::{Action, Palette, MAX_VISIBLE};
 
 mod assistant;
+mod chat_store;
 mod aux_bar;
 mod code_lens;
 mod color_picker;
@@ -377,6 +378,13 @@ enum Hit {
     AssistantChip,
     AssistantAgentMenu,
     AssistantNewChat,
+    AssistantHistory,
+    /// A chat's tab, and its close button.
+    AssistantTab(usize),
+    AssistantTabClose(usize),
+    /// A History row, and its delete button.
+    AssistantHistoryRow(usize),
+    AssistantHistoryDelete(usize),
     AssistantInput,
     AssistantStop,
     AssistantSend,
@@ -848,7 +856,7 @@ impl Workbench {
 
     /// Stops language servers. Call before the app exits.
     pub fn shutdown(&mut self) {
-        self.assistant_stop();
+        self.assistant_shutdown();
         self.ext_shutdown();
         self.debug_shutdown();
         self.lsp.shutdown();
@@ -1222,7 +1230,7 @@ impl Workbench {
             }
             Command::AssistantNewChat => {
                 self.show_aux(aux_bar::AuxTab::Assistant);
-                self.assistant_new_chat();
+                self.assistant_new_chat(String::new());
                 self.focus = Focus::Assistant;
             }
             Command::OutlineFocus => {
@@ -1235,6 +1243,12 @@ impl Workbench {
                 self.focus = Focus::Assistant;
             }
             Command::AssistantSelectAgent => self.assistant_select_agent(),
+            Command::AssistantHistory => {
+                self.show_aux(aux_bar::AuxTab::Assistant);
+                if !self.assistant.history {
+                    self.assistant_toggle_history();
+                }
+            }
             Command::ToggleTerminal => self.toggle_terminal(),
             Command::NewTerminal => self.new_terminal(),
             Command::KillTerminal => self.kill_terminal(),
@@ -2277,7 +2291,7 @@ impl Workbench {
             }
             Hit::AssistantCustomAgent => self.agent_action(AgentAction::Custom),
             Hit::AssistantAction(e, k) => {
-                if let Some(assistant::Entry::Action(_, actions)) = self.assistant.entries.get(e) {
+                if let Some(assistant::Entry::Action(_, actions)) = self.assistant.cur().entries.get(e) {
                     if let Some((_, action)) = actions.get(k).cloned() {
                         self.agent_action(action);
                     }
@@ -2288,17 +2302,26 @@ impl Workbench {
             Hit::AssistantReview(e, d) => self.assistant_review(e, d),
             Hit::AssistantOption(e, o) => self.assistant_answer(e, o),
             Hit::AssistantAuth(e, m) => {
-                if let Some(assistant::Entry::Auth(methods)) = self.assistant.entries.get(e) {
+                if let Some(assistant::Entry::Auth(methods)) = self.assistant.cur().entries.get(e) {
                     if let Some((id, _)) = methods.get(m).cloned() {
                         self.assistant_authenticate(&id);
                     }
                 }
             }
             Hit::AssistantChip => self.assistant.send_file = !self.assistant.send_file,
-            Hit::AssistantNewChat => self.run(Command::AssistantNewChat),
+            Hit::AssistantNewChat => self.assistant_new_chat_menu(),
+            Hit::AssistantHistory => self.assistant_toggle_history(),
+            Hit::AssistantTab(i) => self.select_chat(i),
+            Hit::AssistantTabClose(i) => self.close_chat(i),
+            Hit::AssistantHistoryRow(i) => self.open_saved_chat(i),
+            Hit::AssistantHistoryDelete(i) => {
+                if let Some(id) = self.assistant.saved.get(i).map(|m| m.id.clone()) {
+                    self.agent_action(AgentAction::DeleteChat(id));
+                }
+            }
             Hit::AssistantInput => {
                 self.focus = Focus::Assistant;
-                self.assistant.input.click(x, shift);
+                self.assistant.cur_mut().input.click(x, shift);
             }
             Hit::AssistantStop => self.assistant_cancel(),
             Hit::AssistantSend => self.assistant_send(),
@@ -2587,7 +2610,7 @@ impl Workbench {
             Some(Hit::OutlineRow(_) | Hit::OutlineTwistie(_) | Hit::OutlineBody) => self.outline_scroll(dy),
             Some(Hit::DebugBody(i) | Hit::DebugRow(i, _) | Hit::DebugRowAction(i, _, _)) => self.debug_scroll(i, dy),
             Some(Hit::DebugConsoleBody) => self.debug_console_scroll(dy),
-            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantOption(..) | Hit::AssistantAuth(..) | Hit::AssistantAction(..)) => self.assistant_scroll(dy),
+            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantOption(..) | Hit::AssistantAuth(..) | Hit::AssistantAction(..) | Hit::AssistantHistoryRow(_) | Hit::AssistantHistoryDelete(_)) => self.assistant_scroll(dy),
             Some(Hit::PeekRow(_) | Hit::PeekBody | Hit::PeekTwistie(_)) => self.peek_scroll(dy),
             Some(Hit::Image(g)) => {
                 let gr = &mut self.groups[g];

@@ -80,7 +80,6 @@ impl Workbench {
         self.font_family = self.settings.string("editor.fontFamily");
         self.ui_mono = self.settings.string("workbench.interfaceFont") != "system";
         self.ext_settings_changed();
-        self.assistant_settings_changed();
     }
 
     /// Built-in themes, then extensions' themes and the user's theme files

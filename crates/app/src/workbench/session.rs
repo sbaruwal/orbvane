@@ -79,6 +79,11 @@ struct WorkspaceState {
     /// The Run and Debug sections: open, and dragged heights.
     #[serde(default)]
     debug_sections: Option<Vec<(bool, Option<f32>)>>,
+    /// The Assistant's open chats (`chat_store` ids) and the one shown.
+    #[serde(default)]
+    assistant_chats: Vec<String>,
+    #[serde(default)]
+    assistant_active: Option<String>,
 }
 
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
@@ -136,26 +141,29 @@ pub(super) fn clear_recent() {
     write(&path, &global);
 }
 
-fn state_dir() -> PathBuf {
+pub(super) fn state_dir() -> PathBuf {
     settings::user_data_dir().join("State")
 }
 
-/// A stable name for a folder's state file (FNV-1a of the path).
-fn workspace_file(folder: Option<&Path>) -> PathBuf {
-    let dir = state_dir().join("workspaces");
-    let Some(folder) = folder else { return dir.join("empty.json") };
+/// A stable name for a folder's (or workspace file's) state: FNV-1a of the path.
+pub(super) fn workspace_key(folder: Option<&Path>) -> String {
+    let Some(folder) = folder else { return "empty".into() };
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
     for b in folder.to_string_lossy().bytes() {
         h = (h ^ b as u64).wrapping_mul(0x100_0000_01b3);
     }
-    dir.join(format!("{h:016x}.json"))
+    format!("{h:016x}")
 }
 
-fn read<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
+fn workspace_file(folder: Option<&Path>) -> PathBuf {
+    state_dir().join("workspaces").join(format!("{}.json", workspace_key(folder)))
+}
+
+pub(super) fn read<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
     std::fs::read_to_string(path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
-fn write<T: Serialize>(path: &Path, value: &T) {
+pub(super) fn write<T: Serialize>(path: &Path, value: &T) {
     let Ok(text) = serde_json::to_string_pretty(value) else { return };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
@@ -262,6 +270,7 @@ impl Workbench {
             (Some(tree), Some(root)) => tree.expanded_paths().into_iter().map(|p| p.strip_prefix(root).map_or_else(|_| p.clone(), Path::to_path_buf)).collect(),
             _ => Vec::new(),
         };
+        let (assistant_chats, assistant_active) = self.assistant_session();
         WorkspaceState {
             sidebar_visible: self.sidebar_visible,
             sidebar_width: self.sidebar_w,
@@ -282,6 +291,8 @@ impl Workbench {
             aux_width: self.aux.width,
             aux_tab: self.aux.tab,
             debug_sections: Some(self.debug.view.open.iter().zip(&self.debug.view.heights).map(|(o, h)| (*o, *h)).collect()),
+            assistant_chats,
+            assistant_active,
         }
     }
 
@@ -329,6 +340,7 @@ impl Workbench {
             self.debug.view.open[i] = *open;
             self.debug.view.heights[i] = *h;
         }
+        self.assistant_restore(&state.assistant_chats, state.assistant_active.as_deref());
         if state.groups.is_empty() && state.view.is_empty() {
             return; // nothing saved yet
         }

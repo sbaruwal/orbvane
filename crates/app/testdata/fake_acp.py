@@ -3,13 +3,24 @@
 
 For each prompt it streams a reply, reports a tool call proposing an edit to the file the
 prompt links, asks for permission, and when allowed reads the file through the editor and
-writes it back changed. A prompt saying "sign in" makes the next session/new need a sign-in.
+writes it back changed. A prompt saying "sign in" makes the next session/new need a sign-in
+(in any process started from this script, until someone signs in). Sessions can be loaded
+again (`session/load`, said on stderr), as by a later process.
 """
 import json
+import os
 import sys
 
 next_id = 100
-need_auth = False
+sessions = 0
+AUTH_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "need-auth")
+
+
+def set_need_auth(on):
+    if on:
+        open(AUTH_FILE, "w").close()
+    elif os.path.exists(AUTH_FILE):
+        os.remove(AUTH_FILE)
 
 
 def send(msg):
@@ -80,28 +91,32 @@ def prompt(rid, params):
 
 
 def handle(msg):
-    global need_auth
+    global sessions
     method = msg.get("method")
     rid = msg.get("id")
     params = msg.get("params") or {}
     if method == "initialize":
         send({"jsonrpc": "2.0", "id": rid, "result": {
             "protocolVersion": 1,
-            "agentCapabilities": {"promptCapabilities": {"embeddedContext": True}},
+            "agentCapabilities": {"loadSession": True, "promptCapabilities": {"embeddedContext": True}},
             "agentInfo": {"name": "fake", "title": "Fake Agent", "version": "1"},
             "authMethods": [{"id": "token", "name": "Use a token"}],
         }})
     elif method == "session/new":
-        if need_auth:
+        if os.path.exists(AUTH_FILE):
             send({"jsonrpc": "2.0", "id": rid, "error": {"code": -32000, "message": "Authentication required"}})
         else:
-            send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "s1"}})
+            sessions += 1
+            send({"jsonrpc": "2.0", "id": rid, "result": {"sessionId": "s%d-%d" % (os.getpid(), sessions)}})
+    elif method == "session/load":
+        print("loaded %s" % params["sessionId"], file=sys.stderr, flush=True)
+        send({"jsonrpc": "2.0", "id": rid, "result": None})
     elif method == "authenticate":
-        need_auth = False
+        set_need_auth(False)
         send({"jsonrpc": "2.0", "id": rid, "result": {}})
     elif method == "session/prompt":
         if "sign in" in json.dumps(params["prompt"]):
-            need_auth = True
+            set_need_auth(True)
         prompt(rid, params)
     elif method == "session/cancel":
         pass

@@ -226,12 +226,12 @@ show their message after the failing line, and Test Results has the output.
 </details>
 
 <details>
-<summary><b>Assistant</b>: chat with a coding agent of your choice</summary>
+<summary><b>Assistant</b>: chats with the coding agents of your choice</summary>
 
 <br>
 
-The Assistant (⇧⌘I) is a chat with a coding agent, working in the open folder. Pick the agent
-when you first open it, or later from the menu next to New Chat (or **Assistant: Select Agent**):
+The Assistant (⇧⌘I) chats with coding agents working in the open folder. Pick the agent when you
+first open it, or later from the menu below the message box (or **Assistant: Select Agent**):
 
 - **Claude Code** and **Codex:** Orbvane talks to their command line tools (`claude`, `codex`)
   directly, with no adapter to install. If one isn't installed or signed in, the Assistant offers
@@ -239,7 +239,18 @@ when you first open it, or later from the menu next to New Chat (or **Assistant:
 - **Any other agent** that speaks the [Agent Client Protocol](https://agentclientprotocol.com):
   give the command that starts it (**Custom Command…**). It runs through your login shell.
 
-In the chat:
+Chats:
+
+- Each chat has its own agent, and they run side by side: say, Codex on one change while Claude
+  Code works on another, or several of either. Open chats are tabs above the transcript; **+**
+  starts one with the agent you pick. A dot on a tab means it waits for you (a question) or has
+  finished while you were elsewhere.
+- Chats are kept per folder until you delete them. **History** (the clock button, or
+  **Assistant: Show Chat History**) lists them; right-click a tab to rename, close or delete it.
+- Reopened later, a chat continues where it left off: the agent picks up its earlier
+  conversation. An agent idle for 10 minutes stops, and starts again with the next message.
+
+In a chat:
 
 - The current file and selection go with each message. Click the file's chip to leave it out.
 - Replies stream in with the agent's thoughts, plan and tool calls.

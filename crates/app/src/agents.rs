@@ -87,6 +87,14 @@ impl Choice {
     }
 }
 
+/// The agent a `Choice::key` names (a chat remembers its agent by it).
+pub fn from_key(key: &str) -> Choice {
+    if let Some(command) = key.strip_prefix("custom:") {
+        return Choice::Custom(command.to_string());
+    }
+    find(key).map_or(Choice::None, Choice::Builtin)
+}
+
 impl PartialEq for Agent {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
@@ -202,6 +210,10 @@ mod tests {
         assert_eq!(choice("custom", "claude"), Choice::Custom("claude".into()));
         assert_eq!(choice("none", "claude"), Choice::Builtin(find("claude-code").unwrap()));
         assert_eq!(choice("unknown", "x"), Choice::None);
+        // Chats remember their agent by its key.
+        for c in [Choice::None, Choice::Builtin(codex), Choice::Custom("my-agent --acp".into())] {
+            assert_eq!(from_key(&c.key()), c);
+        }
     }
 
     #[test]

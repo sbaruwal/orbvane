@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 mod bridge;
 pub mod claude;
 pub mod codex;
-pub use bridge::Options;
+pub use bridge::{uuid, Options};
 pub mod mcp;
 pub mod update;
 

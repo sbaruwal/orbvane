@@ -697,7 +697,7 @@ impl Workbench {
         }
     }
 
-    /// A right-click (or ⌃-click): context menus for breakpoints, tests, files and tabs.
+    /// A right-click (or ⌃-click): context menus for breakpoints, tests, files, tabs and chats.
     pub fn context_menu(&mut self, x: f32, y: f32) {
         match self.hit_at(x, y) {
             Some(Hit::GlyphMargin(g)) => {
@@ -709,6 +709,7 @@ impl Workbench {
             Some(Hit::ExplorerRow(i)) => self.explorer_context_menu(Some(i), x, y),
             Some(Hit::Editor(g)) => self.editor_context_menu(g, x, y),
             Some(Hit::Tab(g, i)) => self.tab_context_menu(g, i, x, y),
+            Some(Hit::AssistantTab(i) | Hit::AssistantTabClose(i)) => self.chat_menu(i, x, y),
             Some(Hit::ExtTree(v, super::ext_views::TreeHit::Row(i) | super::ext_views::TreeHit::Inline(i, _))) => self.ext_tree_context_menu(v as usize, i, x, y),
             Some(Hit::SidebarBody) if self.view == super::View::Explorer && self.tree.is_some() => self.explorer_context_menu(None, x, y),
             Some(Hit::DebugRow(3, i) | Hit::DebugRowAction(3, i, _)) => {

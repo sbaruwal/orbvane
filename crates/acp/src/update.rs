@@ -1,9 +1,10 @@
 //! `session/update` notifications as types: what the agent says, thinks, plans and does.
 
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// A file change the agent proposes or made (`oldText` None: a new file).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Diff {
     pub path: String,
     pub old_text: Option<String>,
@@ -11,7 +12,7 @@ pub struct Diff {
 }
 
 /// What a tool call carries: text, a diff, or a terminal's id.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ToolContent {
     Text(String),
     Diff(Diff),
@@ -33,7 +34,7 @@ pub struct ToolCall {
     pub locations: Option<Vec<(String, Option<u64>)>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlanEntry {
     pub content: String,
     /// pending, in_progress, completed.

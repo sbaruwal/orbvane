@@ -24,6 +24,22 @@ fn inherited_session_var(name: &str) -> bool {
     name == "CLAUDECODE" || name.starts_with("CLAUDE_CODE_") || name == "CLAUDE_AGENT_SDK_VERSION" || name == "CODEX_THREAD_ID"
 }
 
+/// A random (version 4) UUID.
+pub fn uuid() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    let read = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+    if read.is_err() {
+        // Not random, but unique enough for a session id.
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        b = (t ^ ((std::process::id() as u128) << 64)).to_le_bytes();
+    }
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("{}-{}-{}-{}-{}", &h[0..8], &h[8..12], &h[12..16], &h[16..20], &h[20..32])
+}
+
 /// The running tool.
 pub struct Lines {
     child: Child,
@@ -85,6 +101,14 @@ impl Lines {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn makes_uuids() {
+        let (a, b) = (super::uuid(), super::uuid());
+        assert_ne!(a, b);
+        assert_eq!(a.len(), 36);
+        assert_eq!(&a[14..15], "4");
+    }
+
     #[test]
     fn knows_session_variables() {
         assert!(super::inherited_session_var("CLAUDECODE"));

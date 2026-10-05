@@ -51,8 +51,8 @@ enum Pending {
     Initialize(Value),
     Models,
     Account,
-    /// Answers the editor's `session/new`.
-    ThreadStart(Value),
+    /// Answers the editor's `session/new` (or `session/load`: true).
+    ThreadStart(Value, bool),
     /// The prompt's `turn/start`.
     TurnStart,
     Ignore,
@@ -212,7 +212,7 @@ impl Bridge {
                 let info = json!({ "clientInfo": { "name": "orbvane", "title": "Orbvane", "version": version } });
                 self.codex_request("initialize", info, Pending::Initialize(id));
             }
-            "session/new" => {
+            "session/new" | "session/load" => {
                 if self.signed_in == Some(false) {
                     return self.reply_error(id, AUTH_REQUIRED, "Codex isn't signed in. Sign in to Codex from the agent menu, then start a new chat.");
                 }
@@ -222,8 +222,14 @@ impl Bridge {
                     config["mcp_servers"] = servers;
                 }
                 self.thread = None;
-                let start = json!({ "cwd": cwd, "approvalPolicy": "untrusted", "sandbox": "workspace-write", "config": config });
-                self.codex_request("thread/start", start, Pending::ThreadStart(id));
+                let mut start = json!({ "cwd": cwd, "approvalPolicy": "untrusted", "sandbox": "workspace-write", "config": config });
+                // An earlier chat: its thread, without sending its turns back (we have them).
+                let load = method == "session/load";
+                if load {
+                    start["threadId"] = params["sessionId"].clone();
+                    start["excludeTurns"] = json!(true);
+                }
+                self.codex_request(if load { "thread/resume" } else { "thread/start" }, start, Pending::ThreadStart(id, load));
             }
             "session/prompt" => {
                 let (Some(thread), None) = (self.thread.clone(), &self.prompt) else {
@@ -295,7 +301,7 @@ impl Bridge {
                     id,
                     json!({
                         "protocolVersion": crate::PROTOCOL_VERSION,
-                        "agentCapabilities": { "loadSession": false, "promptCapabilities": { "embeddedContext": true, "image": false, "audio": false } },
+                        "agentCapabilities": { "loadSession": true, "promptCapabilities": { "embeddedContext": true, "image": false, "audio": false } },
                         "agentInfo": { "name": "codex", "title": "Codex", "version": self.version },
                         "authMethods": [],
                     }),
@@ -319,15 +325,15 @@ impl Bridge {
                 let needs = r["requiresOpenaiAuth"].as_bool().unwrap_or(false);
                 self.signed_in = Some(!needs || !r["account"].is_null());
             }
-            (Pending::ThreadStart(id), Ok(r)) => {
+            (Pending::ThreadStart(id, load), Ok(r)) => {
                 let Some(thread) = r["thread"]["id"].as_str() else {
                     return self.reply_error(id, INTERNAL, "Codex didn't start a conversation.");
                 };
                 self.thread = Some(thread.to_string());
-                self.reply(id, json!({ "sessionId": thread }));
+                self.reply(id, if load { Value::Null } else { json!({ "sessionId": thread }) });
                 self.check_model(r["model"].as_str().unwrap_or(""));
             }
-            (Pending::ThreadStart(id), Err(e)) => self.reply_error(id, INTERNAL, &friendly(&e)),
+            (Pending::ThreadStart(id, _), Err(e)) => self.reply_error(id, INTERNAL, &friendly(&e)),
             (Pending::TurnStart, Ok(r)) => self.turn = r["turn"]["id"].as_str().map(String::from),
             (Pending::TurnStart, Err(e)) => {
                 if let Some(id) = self.prompt.take() {

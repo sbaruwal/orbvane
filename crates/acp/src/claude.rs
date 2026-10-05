@@ -2,7 +2,8 @@
 //! out (`--input-format stream-json --output-format stream-json`, one message per line) and
 //! translates. Started with `Client::in_process`, so the editor sees an ordinary agent.
 //!
-//! - `session/new` starts `claude` in the folder, with the editor's MCP servers
+//! - `session/new` starts `claude` in the folder (with a session id of ours, so `session/load`
+//!   can reopen it later with `--resume`), with the editor's MCP servers
 //!   (`--mcp-config`), asking us before it uses a tool (`--permission-prompt-tool stdio`; the
 //!   permission mode is always `default`, whatever the user's settings say), and sends it the
 //!   control protocol's `initialize`. Each `session/prompt` is a user message, answered when
@@ -62,9 +63,10 @@ struct Bridge {
     options: Options,
     claude: Option<Lines>,
     session: Option<String>,
-    sessions: u32,
-    /// The editor's `session/new` waiting for the control protocol's `initialize`.
+    /// The editor's `session/new` (or `session/load`: `loading`) waiting for the control
+    /// protocol's `initialize`.
     starting: Option<Value>,
+    loading: bool,
     /// The editor's `session/prompt` waiting for its `result`.
     prompt: Option<Value>,
     /// Whether the turn was interrupted (its result then means "cancelled").
@@ -105,8 +107,8 @@ pub fn serve(options: Options, version: String, rx: Receiver<Value>, tx: Sender<
         options,
         claude: None,
         session: None,
-        sessions: 0,
         starting: None,
+        loading: false,
         prompt: None,
         interrupted: false,
         next_control: 0,
@@ -196,12 +198,16 @@ impl Bridge {
                 id,
                 json!({
                     "protocolVersion": crate::PROTOCOL_VERSION,
-                    "agentCapabilities": { "loadSession": false, "promptCapabilities": { "embeddedContext": true, "image": false, "audio": false } },
+                    "agentCapabilities": { "loadSession": true, "promptCapabilities": { "embeddedContext": true, "image": false, "audio": false } },
                     "agentInfo": { "name": "claude-code", "title": "Claude Code", "version": self.version },
                     "authMethods": [],
                 }),
             ),
-            "session/new" => self.new_session(id, params),
+            "session/new" => self.new_session(id, params, None),
+            "session/load" => {
+                let session = params["sessionId"].as_str().unwrap_or("").to_string();
+                self.new_session(id, params, Some(session));
+            }
             "session/prompt" => {
                 if self.claude.is_none() || self.prompt.is_some() || self.starting.is_some() {
                     return self.reply_error(id, INTERNAL, "Claude Code is still answering the last message.");
@@ -219,8 +225,9 @@ impl Bridge {
         }
     }
 
-    /// A new chat: a new `claude` (the old one ends), with the editor's MCP servers.
-    fn new_session(&mut self, id: Value, params: &Value) {
+    /// A new chat (or an earlier one, `resume`): a new `claude` (the old one ends), with the
+    /// editor's MCP servers.
+    fn new_session(&mut self, id: Value, params: &Value, resume: Option<String>) {
         if let Some(c) = self.claude.take() {
             c.end();
         }
@@ -248,6 +255,18 @@ impl Bridge {
         if let Some(servers) = mcp_config(&params["mcpServers"]) {
             args.extend(["--mcp-config".to_string(), servers.to_string()]);
         }
+        let session = match &resume {
+            Some(session) => {
+                args.extend(["--resume".to_string(), session.clone()]);
+                session.clone()
+            }
+            None => {
+                let session = crate::bridge::uuid();
+                args.extend(["--session-id".to_string(), session.clone()]);
+                session
+            }
+        };
+        self.loading = resume.is_some();
         let mut options = Options { program: self.options.program.clone(), args, cwd: self.options.cwd.clone(), env: self.options.env.clone() };
         if let Some(cwd) = params["cwd"].as_str() {
             options.cwd = cwd.into();
@@ -255,8 +274,7 @@ impl Bridge {
         match Lines::spawn(&options, self.events.clone(), self.log.clone()) {
             Ok(lines) => {
                 self.claude = Some(lines);
-                self.sessions += 1;
-                self.session = Some(format!("claude-{}", self.sessions));
+                self.session = Some(session);
                 self.starting = Some(id);
                 self.control(json!({ "subtype": "initialize", "hooks": null }));
             }
@@ -300,6 +318,8 @@ impl Bridge {
                 if let Some(id) = self.starting.take() {
                     let ok = msg["response"]["subtype"].as_str() != Some("error");
                     match (ok, &self.session) {
+                        // session/load answers nothing.
+                        (true, Some(_)) if self.loading => self.reply(id, Value::Null),
                         (true, Some(session)) => self.reply(id, json!({ "sessionId": session })),
                         _ => {
                             let e = msg["response"]["error"].as_str().unwrap_or("Claude Code didn't start.");

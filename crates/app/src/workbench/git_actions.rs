@@ -68,6 +68,8 @@ pub enum GitInput {
     Extension,
     /// The command of a custom Assistant agent.
     AgentCommand,
+    /// A new name for the Assistant chat with this id.
+    ChatName(String),
 }
 
 /// What to run once the commit in progress succeeds.
@@ -491,6 +493,7 @@ impl Workbench {
             GitInput::Watch(index) => self.set_watch(index, value),
             GitInput::EmmetWrap => self.emmet_wrap(value),
             GitInput::AgentCommand => self.set_custom_agent(value),
+            GitInput::ChatName(id) => self.chat_named(&id, value),
             GitInput::Extension => self.ext_answer(serde_json::json!(value)),
             GitInput::NewBranch { from } => self.git_run(Op::CreateBranch { name: sanitize_branch(&value), from }),
             GitInput::RenameBranch => {
