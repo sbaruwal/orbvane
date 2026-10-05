@@ -15,23 +15,13 @@
 //! the chat uses the account's default and says so.
 
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
 use serde_json::{json, Value};
 
-/// How to start Codex.
-pub struct Options {
-    /// The program and arguments that start `codex app-server` (usually the login shell, so
-    /// PATH matches a terminal's).
-    pub program: String,
-    pub args: Vec<String>,
-    pub cwd: PathBuf,
-    pub env: Vec<(String, String)>,
-}
+use crate::bridge::{Lines, Options};
 
 /// The bridge's errors in our answers.
 const INTERNAL: i64 = -32603;
@@ -47,6 +37,12 @@ enum Event {
     /// From Codex.
     Codex(Value),
     CodexGone,
+}
+
+impl From<Option<Value>> for Event {
+    fn from(line: Option<Value>) -> Self {
+        line.map_or(Event::CodexGone, Event::Codex)
+    }
 }
 
 /// A request we sent Codex, waiting for its answer.
@@ -67,17 +63,12 @@ struct Approval {
     codex_id: Value,
 }
 
-struct Codex {
-    child: Child,
-    stdin: ChildStdin,
-}
-
 struct Bridge {
     to_client: Sender<Value>,
     log: Sender<String>,
     events: Sender<Event>,
     options: Options,
-    codex: Option<Codex>,
+    codex: Option<Lines>,
     next_id: i64,
     pending: HashMap<i64, Pending>,
     /// Our requests to the editor (permission questions), by id.
@@ -149,10 +140,8 @@ pub fn serve(options: Options, rx: Receiver<Value>, tx: Sender<Value>, log: Send
             }
         }
     }
-    if let Some(mut c) = b.codex.take() {
-        drop(c.stdin);
-        let _ = c.child.kill();
-        let _ = c.child.wait();
+    if let Some(c) = b.codex.take() {
+        c.end();
     }
 }
 
@@ -178,9 +167,7 @@ impl Bridge {
 
     fn codex_send(&mut self, msg: Value) {
         let Some(c) = &mut self.codex else { return };
-        let mut line = msg.to_string();
-        line.push('\n');
-        if c.stdin.write_all(line.as_bytes()).and_then(|_| c.stdin.flush()).is_err() {
+        if !c.send(&msg) {
             let _ = self.events.send(Event::CodexGone);
         }
     }
@@ -193,40 +180,7 @@ impl Bridge {
     }
 
     fn start_codex(&mut self) -> std::io::Result<()> {
-        let o = &self.options;
-        let mut child = Command::new(&o.program)
-            .args(&o.args)
-            .current_dir(&o.cwd)
-            .envs(o.env.iter().map(|(k, v)| (k, v)))
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let stdout = child.stdout.take().expect("piped stdout");
-        let stderr = child.stderr.take().expect("piped stderr");
-        let stdin = child.stdin.take().expect("piped stdin");
-        let events = self.events.clone();
-        thread::Builder::new().name("codex reader".into()).spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                let Ok(line) = line else { break };
-                if let Ok(msg) = serde_json::from_str::<Value>(line.trim()) {
-                    if events.send(Event::Codex(msg)).is_err() {
-                        return;
-                    }
-                }
-            }
-            let _ = events.send(Event::CodexGone);
-        })?;
-        let log = self.log.clone();
-        thread::Builder::new().name("codex stderr".into()).spawn(move || {
-            for line in BufReader::new(stderr).lines() {
-                let Ok(line) = line else { break };
-                if log.send(line).is_err() {
-                    return;
-                }
-            }
-        })?;
-        self.codex = Some(Codex { child, stdin });
+        self.codex = Some(Lines::spawn(&self.options, self.events.clone(), self.log.clone())?);
         Ok(())
     }
 
@@ -580,7 +534,7 @@ fn mcp_servers(servers: &Value) -> Option<Value> {
 }
 
 /// The prompt's content blocks as one text: Codex takes text (its file inputs are images).
-fn prompt_text(blocks: &Value) -> String {
+pub(crate) fn prompt_text(blocks: &Value) -> String {
     let mut parts = Vec::new();
     for b in blocks.as_array().into_iter().flatten() {
         match b["type"].as_str() {
@@ -728,7 +682,7 @@ pub fn apply_unified(old: &str, diff: &str) -> Option<String> {
 }
 
 /// The last `n` lines of `text`.
-fn tail(text: &str, n: usize) -> String {
+pub(crate) fn tail(text: &str, n: usize) -> String {
     let lines: Vec<&str> = text.lines().collect();
     let start = lines.len().saturating_sub(n);
     let mut out = lines[start..].join("\n");

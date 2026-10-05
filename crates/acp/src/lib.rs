@@ -19,7 +19,10 @@ use std::thread;
 
 use serde_json::{json, Value};
 
+mod bridge;
+pub mod claude;
 pub mod codex;
+pub use bridge::Options;
 pub mod mcp;
 pub mod update;
 

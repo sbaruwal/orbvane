@@ -232,10 +232,21 @@ impl Workbench {
         }
         match a.id {
             "codex" => self.start_codex(),
-            _ => {
-                self.assistant.queued = None;
-                self.assistant_notice(format!("Orbvane can't talk to {} yet: support for it is on its way.", a.name));
-            }
+            _ => self.start_claude(),
+        }
+    }
+
+    /// Claude Code through our bridge (`acp::claude`), which runs `claude -p` with JSON in and
+    /// out. The bridge adds its own arguments after these ("$@").
+    fn start_claude(&mut self) {
+        let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
+        let command = self.assistant.server_override.clone().unwrap_or_else(|| "exec claude \"$@\"".into());
+        let cwd = self.agent_cwd();
+        let options = acp::Options { program: shell, args: vec!["-l".into(), "-c".into(), command, "claude".into()], cwd: cwd.clone(), env: self.mcp_env() };
+        let version = self.assistant.probes.get("claude-code").map(|p| p.version.clone()).unwrap_or_default();
+        match Client::in_process("claude", self.waker.clone(), move |rx, tx, log| acp::claude::serve(options, version, rx, tx, log)) {
+            Ok(client) => self.agent_started(client, Choice::Builtin(agents::find("claude-code").unwrap()), cwd),
+            Err(e) => self.assistant_notice(format!("Couldn't start Claude Code: {e}")),
         }
     }
 
@@ -244,7 +255,7 @@ impl Workbench {
         let shell = std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/zsh".into());
         let command = self.assistant.server_override.clone().unwrap_or_else(|| "exec codex app-server".into());
         let cwd = self.agent_cwd();
-        let options = acp::codex::Options { program: shell, args: vec!["-l".into(), "-c".into(), command], cwd: cwd.clone(), env: self.mcp_env() };
+        let options = acp::Options { program: shell, args: vec!["-l".into(), "-c".into(), command], cwd: cwd.clone(), env: self.mcp_env() };
         match Client::in_process("codex", self.waker.clone(), move |rx, tx, log| acp::codex::serve(options, rx, tx, log)) {
             Ok(client) => self.agent_started(client, Choice::Builtin(agents::find("codex").unwrap()), cwd),
             Err(e) => self.assistant_notice(format!("Couldn't start Codex: {e}")),
@@ -752,7 +763,14 @@ impl Workbench {
                     "refusal" => self.assistant_notice("The agent declined to continue."),
                     other => self.assistant_notice(format!("The agent stopped ({other}).")),
                 },
-                Err((_, e)) => self.assistant_notice(format!("The agent reported an error: {e}")),
+                Err((code, e)) => match self.agent_choice() {
+                    // One of ours whose sign-in expired: the button signs in again.
+                    Choice::Builtin(agent) if code == AUTH_REQUIRED => {
+                        self.assistant.probes.remove(agent.id);
+                        self.assistant_action(e, vec![("Sign In".into(), AgentAction::SignIn(agent.id))]);
+                    }
+                    _ => self.assistant_notice(format!("The agent reported an error: {e}")),
+                },
             }
         }
     }
@@ -770,7 +788,8 @@ impl Workbench {
         match u {
             Update::AgentText(t) => match entries.last_mut() {
                 Some(Entry::Agent(s)) => s.push_str(&t),
-                _ => entries.push(Entry::Agent(t)),
+                // A paragraph break before the first text after a tool call means nothing.
+                _ => entries.push(Entry::Agent(t.trim_start_matches('\n').to_string())),
             },
             Update::Thought(t) => match entries.last_mut() {
                 Some(Entry::Thought(s)) => s.push_str(&t),
@@ -1589,7 +1608,7 @@ mod agent_tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world!\n");
         assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Run `ls -1`" && t.status == "completed")));
         assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")));
-        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Agent(t)) if t.ends_with("\n\nDone.")), "{:#?}", wb.assistant.entries.last());
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Agent(t)) if t == "Done."), "{:#?}", wb.assistant.entries.last());
         // The editor tools went to Codex's config.
         assert!(wb.output.lines("Assistant").iter().any(|l| l == "mcp servers: ['orbvane']"), "{:?}", wb.output.lines("Assistant"));
 
@@ -1600,6 +1619,77 @@ mod agent_tests {
         assert!(matches!(wb.assistant.entries.last(), Some(Entry::Notice(n)) if n == "The agent reported an error: Model is unavailable."));
 
         // Stop interrupts the turn.
+        type_and_send(&mut wb, "wait for me");
+        until(&mut wb, &mut r, "the turn to start", |wb| wb.assistant.phase == Phase::Working);
+        std::thread::sleep(Duration::from_millis(200));
+        wb.assistant_cancel();
+        until(&mut wb, &mut r, "the stop", |wb| wb.assistant.phase == Phase::Ready);
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Notice(n)) if n == "Stopped."));
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Claude Code through the bridge, with `testdata/fake_claude.py` standing in for
+    /// `claude`: the flags that make it ask us, the stream (thinking, text, the plan), an edit
+    /// asked for with its diff and landing on disk, "allow for this chat" remembered for a
+    /// command, a rejected edit, an expired sign-in offering Sign In, and Stop.
+    #[test]
+    fn a_conversation_with_claude_code() {
+        let (mut wb, dir) = workbench("claude", r#"{ "assistant.agent": "claude-code" }"#);
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let fake = dir.join("fake_claude.py");
+        std::fs::write(&fake, include_str!("../../testdata/fake_claude.py")).unwrap();
+        wb.assistant.server_override = Some(format!("exec python3 {} \"$@\"", fake.display()));
+        wb.assistant.probes.insert("claude-code", Probe { path: Some("/x/claude".into()), version: "2.1".into(), signed_in: true });
+        wb.open_file(&file);
+        let mut r = None;
+        let question = |wb: &Workbench, n: usize| wb.assistant.entries.iter().filter(|e| matches!(e, Entry::Permission(_))).count() == n;
+        let last_question = |wb: &Workbench| wb.assistant.entries.iter().rposition(|e| matches!(e, Entry::Permission(_))).unwrap();
+
+        type_and_send(&mut wb, "make it polite");
+        until(&mut wb, &mut r, "the edit question", |wb| question(wb, 1));
+        let i = last_question(&wb);
+        let Entry::Permission(p) = &wb.assistant.entries[i] else { unreachable!() };
+        assert_eq!(p.title, "Edit notes.txt");
+        assert_eq!(p.diffs[0].new_text, "goodbye world\n");
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Agent(t) if t == "Using tools")), "{:#?}", wb.assistant.entries);
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Thought(t) if t == "Looking at it.")));
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Plan(p) if p.len() == 2 && p[1].status == "in_progress")));
+        assert_eq!(wb.assistant.agent_name, "Claude Code");
+        wb.assistant_answer(i, 0);
+        until(&mut wb, &mut r, "the command question", |wb| question(wb, 2));
+        let j = last_question(&wb);
+        let Entry::Permission(p) = &wb.assistant.entries[j] else { unreachable!() };
+        assert_eq!(p.title, "Run `ls -1`");
+        assert_eq!(p.options[1].1, "Allow This Command for This Chat");
+        wb.assistant_answer(j, 1);
+        until(&mut wb, &mut r, "the end of the answer", |wb| wb.assistant.phase == Phase::Ready);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world\n");
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")));
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Run `ls -1`" && t.status == "completed")));
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Agent(t)) if t == "Done."), "{:#?}", wb.assistant.entries.last());
+        let log = wb.output.lines("Assistant");
+        assert!(log.iter().any(|l| l == "flags ok") && log.iter().any(|l| l == "mcp servers: ['orbvane']"), "{log:?}");
+
+        // Again: the edit is asked for (rejected this time), the command isn't.
+        std::fs::write(&file, "hello again\n").unwrap();
+        type_and_send(&mut wb, "once more");
+        until(&mut wb, &mut r, "the second edit question", |wb| question(wb, 3));
+        let k = last_question(&wb);
+        wb.assistant_answer(k, 2);
+        until(&mut wb, &mut r, "the end of the second answer", |wb| wb.assistant.phase == Phase::Ready);
+        assert!(question(&wb, 3), "the command was asked about again");
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello again\n");
+        assert!(wb.assistant.entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "failed")));
+
+        // An expired sign-in: a Sign In button.
+        wb.assistant.send_file = false;
+        type_and_send(&mut wb, "expired?");
+        until(&mut wb, &mut r, "the sign-in prompt", |wb| wb.assistant.phase == Phase::Ready && matches!(wb.assistant.entries.last(), Some(Entry::Action(..))));
+        assert!(matches!(wb.assistant.entries.last(), Some(Entry::Action(t, a)) if t.contains("sign-in has expired") && a[0].1 == AgentAction::SignIn("claude-code")));
+
+        // Stop interrupts it.
         type_and_send(&mut wb, "wait for me");
         until(&mut wb, &mut r, "the turn to start", |wb| wb.assistant.phase == Phase::Working);
         std::thread::sleep(Duration::from_millis(200));

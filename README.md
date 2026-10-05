@@ -233,8 +233,9 @@ show their message after the failing line, and Test Results has the output.
 The Assistant (⇧⌘I) is a chat with a coding agent, working in the open folder. Pick the agent
 when you first open it, or later from the menu next to New Chat (or **Assistant: Select Agent**):
 
-- **Codex:** Orbvane talks to the `codex` command line tool directly, with no adapter to
-  install. If it isn't installed or signed in, the Assistant offers to do that in a terminal.
+- **Claude Code** and **Codex:** Orbvane talks to their command line tools (`claude`, `codex`)
+  directly, with no adapter to install. If one isn't installed or signed in, the Assistant offers
+  to do that in a terminal.
 - **Any other agent** that speaks the [Agent Client Protocol](https://agentclientprotocol.com):
   give the command that starts it (**Custom Command…**). It runs through your login shell.
 
@@ -247,9 +248,9 @@ In the chat:
 - **Editor tools:** the agent can ask Orbvane's language servers for definitions, references,
   hovers and symbols, and read the Problems list (`assistant.editorTools`).
 - Agents that speak the protocol read files through the editor, unsaved changes included, and
-  their edits land as one undo step. Codex reads and writes files on disk, so files with unsaved
-  changes are saved before each message (`assistant.saveBeforeSending`), and open files reload
-  when it changes them.
+  their edits land as one undo step. Claude Code and Codex read and write files on disk, so files
+  with unsaved changes are saved before each message (`assistant.saveBeforeSending`), and open
+  files reload when they change them.
 
 </details>
 
@@ -467,7 +468,7 @@ Crates are used only for the low-level pieces: `winit` (window and events), `wgp
 
 | Crate | Purpose |
 |---|---|
-| `acp` | Agent Client Protocol client for the Assistant; `codex`: Codex's app server behind that protocol; `mcp`: the editor's tools as a Model Context Protocol server |
+| `acp` | Agent Client Protocol client for the Assistant; `claude`, `codex`: Claude Code and Codex behind that protocol; `mcp`: the editor's tools as a Model Context Protocol server |
 | `app` | Platform layer (`main.rs`) and the workbench: everything drawn |
 | `cargo-orbvane` | `cargo orbvane package` (extensions to `.vsix`) and `cargo orbvane registry` (the registry's CI) |
 | `css` | CSS, SCSS and Less language server |
