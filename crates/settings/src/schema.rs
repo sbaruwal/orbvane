@@ -632,6 +632,16 @@ fn builtin() -> Vec<Setting> {
                 section: Section::Appearance,
                 description: "Specifies the color theme used in the workbench.",
             },
+            Setting {
+                key: "workbench.startupEditor",
+                default: "\"welcomePage\"",
+                kind: Kind::Enum(&[
+                    ("welcomePage", "Open the Welcome page when nothing else opens at startup."),
+                    ("none", "Start without an editor."),
+                ]),
+                section: Section::Appearance,
+                description: "Controls which editor is shown at startup, if none are restored.",
+            },
             // Features
             Setting {
                 key: "search.searchEditor.doubleClickBehaviour",

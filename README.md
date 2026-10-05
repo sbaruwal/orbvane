@@ -55,6 +55,8 @@ Click a section to expand it.
   Extensions, Testing, and views that extensions add), with badges for changes, test results
   and updates. Clicking the active view hides the sidebar. The Explorer is headed by the
   project's name.
+- **Welcome page** (Help → Welcome): start a file or folder, reopen a recent one, pick a theme,
+  set up the Assistant. It opens at startup when nothing else does (`workbench.startupEditor`).
 - **Secondary side bar** (⌥⌘B): the Assistant, plus the Outline and Timeline of the active file.
   Drag its edge to resize it.
 - **Status bar:** a row of pills for sync, the language server (with its progress; click for its

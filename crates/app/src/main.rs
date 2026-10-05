@@ -403,7 +403,7 @@ fn build_menu() -> Menu {
         &[&PredefinedMenuItem::minimize(None), &PredefinedMenuItem::maximize(Some("Zoom")), &sep(), &PredefinedMenuItem::fullscreen(None)],
     )
     .unwrap();
-    let help = Submenu::with_items("Help", true, &[&menu_item(Command::CommandPalette)]).unwrap();
+    let help = Submenu::with_items("Help", true, &[&menu_item(Command::Welcome), &menu_item(Command::CommandPalette)]).unwrap();
     let menu = Menu::with_items(&[&app, &file, &edit, &selection, &view, &go, &run, &terminal, &window, &help]).unwrap();
     window.set_as_windows_menu_for_nsapp();
     menu

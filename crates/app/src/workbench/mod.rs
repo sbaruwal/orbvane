@@ -20,6 +20,7 @@ use crate::palette::{Action, Palette, MAX_VISIBLE};
 
 mod assistant;
 mod chat_store;
+mod welcome;
 mod aux_bar;
 mod code_lens;
 mod color_picker;
@@ -380,6 +381,7 @@ enum Hit {
     AssistantNewChat,
     AssistantHistory,
     AssistantModeMenu,
+    Welcome(welcome::WelcomeHit),
     AssistantModelMenu,
     /// A chat's tab, and its close button.
     AssistantTab(usize),
@@ -622,6 +624,7 @@ pub struct Workbench {
     /// The secondary side bar, and the Assistant drawn in it.
     aux: aux_bar::AuxBar,
     assistant: assistant::Assistant,
+    welcome: welcome::Welcome,
     /// The editor's tools for the agent (MCP).
     tools: mcp::EditorTools,
 }
@@ -738,6 +741,7 @@ impl Workbench {
             outline_menu_at: (0.0, 0.0),
             aux: Default::default(),
             assistant: Default::default(),
+            welcome: Default::default(),
             tools: Default::default(),
         };
         wb.apply_settings();
@@ -766,6 +770,10 @@ impl Workbench {
         }
         for file in files {
             wb.open_file(file);
+        }
+        // (Tests start without it.)
+        if !cfg!(test) {
+            wb.welcome_at_startup();
         }
         wb
     }
@@ -1272,6 +1280,7 @@ impl Workbench {
             }
             Command::OpenSettings => self.open_settings_ui(),
             Command::OpenKeybindings => self.open_keyboard_shortcuts(),
+            Command::Welcome => self.open_welcome(),
             Command::OpenRecent => self.open_recent_picker(),
             Command::InsertSnippet => self.open_insert_snippet(),
             Command::GitStageSelectedRanges => self.stage_selected_ranges(),
@@ -1843,6 +1852,10 @@ impl Workbench {
                 if to_query {
                     return self.focus_search_editor_input();
                 }
+                // The Welcome page takes no typing.
+                if self.active_editor().is_some_and(|e| e.welcome) {
+                    return;
+                }
                 if let Some((ed, doc)) = self.active_mut() {
                     ed.key(doc, &k);
                 }
@@ -2314,6 +2327,7 @@ impl Workbench {
             Hit::AssistantNewChat => self.assistant_new_chat_menu(),
             Hit::AssistantHistory => self.assistant_toggle_history(),
             Hit::AssistantModeMenu => self.assistant_mode_menu(),
+            Hit::Welcome(w) => self.welcome_click(w),
             Hit::AssistantModelMenu => self.assistant_model_menu(),
             Hit::AssistantTab(i) => self.select_chat(i),
             Hit::AssistantTabClose(i) => self.close_chat(i),
@@ -2584,6 +2598,7 @@ impl Workbench {
         match hit {
             Some(Hit::CompletionRow(_) | Hit::CompletionBox) => self.scroll_completion(dy),
             Some(Hit::TerminalPane(p)) => self.terminal_scroll(p, dy),
+            Some(Hit::Welcome(_)) => self.welcome_scroll(dy),
             Some(Hit::Diff(g)) => {
                 let gr = &mut self.groups[g];
                 if let Some(diff) = gr.tabs.get_mut(gr.active).and_then(|t| t.diff.as_mut()) {
@@ -3320,6 +3335,12 @@ impl Workbench {
             c.pop_clip();
             return;
         }
+        if self.groups[g].tabs.get(self.groups[g].active).is_some_and(|t| t.welcome) {
+            c.push_clip(body);
+            self.draw_welcome(c, body);
+            c.pop_clip();
+            return;
+        }
         if self.groups[g].tabs.get(self.groups[g].active).is_some_and(|t| t.image.is_some()) {
             c.push_clip(body);
             self.draw_image(c, g, body);
@@ -3473,6 +3494,7 @@ impl Workbench {
                     None if t.markdown.is_some() => (format!("Preview {}", doc.title()), false, path),
                     None if t.merge.is_some() => (format!("Merging: {}", doc.title()), doc.buffer.is_dirty(), path),
                     None if t.settings => ("Settings".to_string(), false, PathBuf::new()),
+                    None if t.welcome => ("Welcome".to_string(), false, PathBuf::new()),
                     None => (doc.title(), doc.buffer.is_dirty(), path),
                 }
             })
@@ -3508,6 +3530,8 @@ impl Workbench {
             };
             if self.groups[g].tabs[i].settings {
                 c.icon(&icons::SETTINGS, tr.x + 11.0, tr.y + 10.5, 14.0, self.color("icon.foreground"));
+            } else if self.groups[g].tabs[i].welcome {
+                c.icon(&icons::INFO, tr.x + 11.0, tr.y + 10.5, 14.0, self.color("icon.foreground"));
             } else {
                 c.icon(&icons::FILE, tr.x + 11.0, tr.y + 10.5, 14.0, file_color(path));
             }
@@ -3822,7 +3846,7 @@ impl Workbench {
         let mut language_item = None;
         if let Some(pv) = self.active_editor().and_then(|e| e.image.as_ref()) {
             items.extend(pv.status());
-        } else if let (Some(ed), Some(doc)) = (self.active_editor().filter(|e| !e.settings && !e.markdown.as_ref().is_some_and(|m| m.extension.is_some())), self.active_doc()) {
+        } else if let (Some(ed), Some(doc)) = (self.active_editor().filter(|e| !e.settings && !e.welcome && !e.markdown.as_ref().is_some_and(|m| m.extension.is_some())), self.active_doc()) {
             let (line, col) = ed.line_col();
             let sels = ed.selections();
             let selected: usize = sels.iter().map(|s| doc.buffer.text_in(s).chars().count()).sum();

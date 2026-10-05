@@ -145,3 +145,38 @@ fn rows_stay_inside_their_lists() {
     assert!((head.y - (TITLE_H + SWITCHER_H)).abs() < 0.5, "{head:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Help → Welcome: the page's links, themes and recent folders are drawn and clickable, and it
+/// takes no typing.
+#[test]
+fn welcome_page() {
+    let dir = std::env::temp_dir().join(format!("orbvane-welcome-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[], std::sync::Arc::new(|| {}));
+    let Ok(mut r) = render::Renderer::offscreen((1200, 800), 1.0) else { return };
+    wb.run(Command::Welcome);
+    assert!(wb.active_editor().is_some_and(|e| e.welcome));
+    draw(&mut wb, &mut r);
+    use welcome::WelcomeHit;
+    for hit in [WelcomeHit::Run(Command::NewFile), WelcomeHit::Run(Command::OpenFolder), WelcomeHit::Run(Command::GitClone), WelcomeHit::Theme(0), WelcomeHit::Theme(2), WelcomeHit::ShowOnStartup] {
+        spot(&wb, Hit::Welcome(hit));
+    }
+    if let Some(out) = std::env::var_os("ORBVANE_WELCOME_SNAPSHOT") {
+        let (w, h, px) = r.pixels();
+        render::write_png(std::path::Path::new(&out), w, h, &px).unwrap();
+    }
+    // Typing goes nowhere; a link runs its command.
+    wb.key(crate::input::KeyInput { key: crate::input::Key::Char("x".into()), text: Some("x".into()), cmd: false, shift: false, alt: false, ctrl: false });
+    assert!(wb.docs[wb.active_editor().unwrap().doc].as_ref().unwrap().buffer.text().is_empty());
+    click(&mut wb, &mut r, Hit::Welcome(WelcomeHit::Run(Command::CommandPalette)));
+    assert!(wb.palette.is_some());
+    // Opened again, it's the same tab.
+    wb.palette = None;
+    wb.run(Command::Welcome);
+    assert_eq!(wb.groups.iter().map(|g| g.tabs.iter().filter(|t| t.welcome).count()).sum::<usize>(), 1);
+    wb.shutdown();
+    let _ = std::fs::remove_dir_all(&dir);
+}
