@@ -394,8 +394,9 @@ impl Servers {
 
     /// Initialization options for built-in server `command` ("builtin:json"), merged over the
     /// ones in `languages.json`.
-    pub fn set_builtin_options(&mut self, command: &'static str, options: Value) {
-        self.builtin_options.insert(command, options);
+    /// Returns whether they changed.
+    pub fn set_builtin_options(&mut self, command: &'static str, options: Value) -> bool {
+        self.builtin_options.insert(command, options.clone()).is_none_or(|old| old != options)
     }
 
     /// Starts a server that runs inside the editor (`"command": "builtin:<name>"`).

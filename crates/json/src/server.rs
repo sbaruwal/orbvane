@@ -1,9 +1,12 @@
 //! The JSON language server, run in-process (`lsp::Client::in_process`). Schemas come with
 //! `initialize` (`initializationOptions.schemas`: `{ fileMatch, uri, schema }`, like the
-//! `json.schemas` setting) or from a document's own `$schema` (a local file).
+//! `json.schemas` setting; an entry without `schema` is loaded from its `uri`) or from a
+//! document's own `$schema`. Schemas named by URL are downloaded with `/usr/bin/curl` (unless
+//! `download` is false) and kept in the `cache` folder for a week.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use std::sync::mpsc::{Receiver, Sender};
 
 use lsp::server::{Service, TextDocument};
@@ -16,14 +19,54 @@ use crate::schema::{self, Severity, Validator};
 struct Association {
     patterns: Vec<String>,
     uri: String,
-    schema: Value,
+    /// None: loaded from `uri`.
+    schema: Option<Value>,
 }
 
 #[derive(Default)]
 struct JsonService {
     associations: Vec<Association>,
-    /// Schemas loaded from files named by `$schema`.
-    loaded: HashMap<PathBuf, Option<Value>>,
+    /// Schemas loaded from files and URLs, by path or URL (None: couldn't be).
+    loaded: HashMap<String, Option<Value>>,
+    download: bool,
+    cache: Option<PathBuf>,
+}
+
+/// How long a downloaded schema is used before it's downloaded again.
+const CACHE_FOR: Duration = Duration::from_secs(7 * 24 * 3600);
+
+/// A file name for `url` in the cache (FNV-1a).
+fn cache_name(url: &str) -> String {
+    let hash = url.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+    format!("{hash:016x}.json")
+}
+
+fn parse_schema(text: &str) -> Option<Value> {
+    let doc = Doc::parse(text);
+    doc.root.map(|r| doc.value(r)).filter(Value::is_object)
+}
+
+/// Downloads `url`, or takes it from `cache` while fresh (or when the download fails).
+fn download(url: &str, cache: Option<&Path>) -> Option<String> {
+    let cached = cache.map(|c| c.join(cache_name(url)));
+    let fresh = cached.as_ref().and_then(|p| std::fs::metadata(p).ok()).and_then(|m| m.modified().ok()).is_some_and(|t| SystemTime::now().duration_since(t).unwrap_or_default() < CACHE_FOR);
+    if fresh {
+        if let Some(text) = cached.as_ref().and_then(|p| std::fs::read_to_string(p).ok()) {
+            return Some(text);
+        }
+    }
+    let out = std::process::Command::new("/usr/bin/curl").args(["-sSfL", "--max-time", "15", "--", url]).output().ok();
+    match out.filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok()) {
+        Some(text) => {
+            if let Some(path) = &cached {
+                if parse_schema(&text).is_some() && path.parent().is_some_and(|d| std::fs::create_dir_all(d).is_ok()) {
+                    let _ = std::fs::write(path, &text);
+                }
+            }
+            Some(text)
+        }
+        None => cached.and_then(|p| std::fs::read_to_string(p).ok()),
+    }
 }
 
 /// Runs the server until the client goes away or sends `exit`.
@@ -36,8 +79,12 @@ impl Service for JsonService {
         for entry in params["initializationOptions"]["schemas"].as_array().into_iter().flatten() {
             let patterns = entry["fileMatch"].as_array().into_iter().flatten().filter_map(Value::as_str).map(String::from).collect();
             let uri = entry["uri"].as_str().unwrap_or_default().to_string();
-            self.associations.push(Association { patterns, uri, schema: entry["schema"].clone() });
+            let schema = Some(entry["schema"].clone()).filter(|s| !s.is_null());
+            self.associations.push(Association { patterns, uri, schema });
         }
+        let options = &params["initializationOptions"];
+        self.download = options["download"].as_bool().unwrap_or(true);
+        self.cache = options["cache"].as_str().map(PathBuf::from);
         json!({
             "capabilities": {
                 "completionProvider": { "triggerCharacters": ["\""] },
@@ -164,40 +211,59 @@ impl JsonService {
         let declared = doc.root.and_then(|r| doc.get(r, "$schema")).map(|n| doc.node(n).text.clone());
         if let Some(declared) = declared {
             if let Some(i) = self.associations.iter().position(|a| a.uri == declared) {
-                return Some(SchemaRef::Association(i));
+                return self.association(i);
             }
-            let path = match declared.strip_prefix("file://") {
-                Some(p) => Some(PathBuf::from(decode(p))),
-                None if declared.starts_with('/') => Some(PathBuf::from(&declared)),
-                None if !declared.contains("://") => uri_to_path(uri).and_then(|p| p.parent().map(|d| d.join(&declared))),
-                None => None,
+            let location = match declared.strip_prefix("file://") {
+                Some(p) => decode(p),
+                None if declared.starts_with('/') || declared.starts_with("http://") || declared.starts_with("https://") => declared,
+                None if !declared.contains("://") => uri_to_path(uri)?.parent()?.join(&declared).to_string_lossy().into_owned(),
+                None => return None,
             };
-            if let Some(path) = path {
-                self.loaded.entry(path.clone()).or_insert_with(|| {
-                    let text = std::fs::read_to_string(&path).ok()?;
-                    let doc = Doc::parse(&text);
-                    doc.root.map(|r| doc.value(r))
-                });
-                return Some(SchemaRef::File(path));
-            }
-            return None;
+            return self.load(&location);
         }
         let path = uri_to_path(uri)?;
         let path = path.to_string_lossy();
-        self.associations.iter().position(|a| a.patterns.iter().any(|p| file_matches(p, &path))).map(SchemaRef::Association)
+        let i = self.associations.iter().position(|a| a.patterns.iter().any(|p| file_matches(p, &path)))?;
+        self.association(i)
+    }
+
+    fn association(&mut self, i: usize) -> Option<SchemaRef> {
+        if self.associations[i].schema.is_some() {
+            return Some(SchemaRef::Association(i));
+        }
+        let uri = self.associations[i].uri.clone();
+        let location = match uri.strip_prefix("file://") {
+            Some(p) => decode(p),
+            None => uri,
+        };
+        self.load(&location)
+    }
+
+    /// The schema in a file or at a URL, loaded once.
+    fn load(&mut self, location: &str) -> Option<SchemaRef> {
+        if !self.loaded.contains_key(location) {
+            let remote = location.starts_with("http://") || location.starts_with("https://");
+            let text = match remote {
+                true if self.download => download(location, self.cache.as_deref()),
+                true => None,
+                false => std::fs::read_to_string(location).ok(),
+            };
+            self.loaded.insert(location.to_string(), text.as_deref().and_then(parse_schema));
+        }
+        Some(SchemaRef::Loaded(location.to_string()))
     }
 
     fn schema_value(&self, r: &SchemaRef) -> Option<&Value> {
         match r {
-            SchemaRef::Association(i) => Some(&self.associations[*i].schema),
-            SchemaRef::File(p) => self.loaded.get(p)?.as_ref(),
+            SchemaRef::Association(i) => self.associations[*i].schema.as_ref(),
+            SchemaRef::Loaded(l) => self.loaded.get(l)?.as_ref(),
         }
     }
 }
 
 enum SchemaRef {
     Association(usize),
-    File(PathBuf),
+    Loaded(String),
 }
 
 fn decode(s: &str) -> String {
@@ -281,5 +347,59 @@ mod tests {
         assert_eq!(items.as_array().unwrap().len(), 0); // `a` is already there
         to_server.send(json!({ "jsonrpc": "2.0", "method": "exit" })).unwrap();
         thread.join().unwrap();
+    }
+
+    /// Serves `body` over HTTP on a local port for `n` requests; its URL.
+    fn serve_once(body: &'static str, n: usize) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/schema.json", listener.local_addr().unwrap());
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(n).flatten() {
+                let mut stream = stream;
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
+                let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        url
+    }
+
+    /// Diagnostics for a document, with these initialization options.
+    fn messages(options: Value, uri: &str, text: &str) -> Vec<String> {
+        let (to_server, rx) = channel();
+        let (tx, from_server) = channel();
+        let thread = std::thread::spawn(move || serve(rx, tx));
+        to_server.send(json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "initializationOptions": options } })).unwrap();
+        from_server.recv().unwrap();
+        to_server.send(json!({ "jsonrpc": "2.0", "method": "textDocument/didOpen", "params": { "textDocument": {
+            "uri": uri, "languageId": "json", "version": 1, "text": text } } })).unwrap();
+        let diags = from_server.recv().unwrap();
+        to_server.send(json!({ "jsonrpc": "2.0", "method": "exit" })).unwrap();
+        thread.join().unwrap();
+        diags["params"]["diagnostics"].as_array().unwrap().iter().map(|d| d["message"].as_str().unwrap().to_string()).collect()
+    }
+
+    #[test]
+    fn schemas_from_urls_and_files() {
+        let dir = std::env::temp_dir().join(format!("orbvane-json-schemas-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let cache = dir.join("cache");
+        let url = serve_once(r#"{ "properties": { "port": { "type": "number" } } }"#, 1);
+        let text = format!(r#"{{ "$schema": "{url}", "port": "80" }}"#);
+        let options = json!({ "cache": cache });
+        assert_eq!(messages(options.clone(), "file:///w/a.json", &text), ["Incorrect type. Expected \"number\"."]);
+        // The second time it comes from the cache (the server is gone).
+        assert_eq!(std::fs::read_dir(&cache).unwrap().count(), 1);
+        assert_eq!(messages(options, "file:///w/a.json", &text), ["Incorrect type. Expected \"number\"."]);
+        // Downloads off: no schema.
+        assert!(messages(json!({ "download": false }), "file:///w/a.json", &text).is_empty());
+        // A `json.schemas` entry naming a file.
+        let file = dir.join("s.json");
+        std::fs::write(&file, r#"{ "required": ["name"] }"#).unwrap();
+        let options = json!({ "schemas": [{ "fileMatch": ["*.conf.json"], "uri": format!("file://{}", file.display()) }] });
+        assert_eq!(messages(options, "file:///w/x.conf.json", "{}"), ["Missing property \"name\"."]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

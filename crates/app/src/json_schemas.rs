@@ -203,6 +203,35 @@ pub fn workspace(settings: &Value) -> Value {
 }
 
 /// The initialization options of the built-in JSON server: each schema and the files it's for.
+/// The `json.schemas` setting's entries as associations: `url` relative to `folder` (the
+/// first workspace folder) or absolute becomes a `file://` URI; an entry with its `schema`
+/// inline gets a made-up URI.
+pub fn from_setting(setting: &Value, folder: Option<&std::path::Path>) -> Vec<Value> {
+    let entries = setting.as_array().into_iter().flatten().enumerate();
+    entries
+        .filter_map(|(i, e)| {
+            let file_match: Vec<Value> = match &e["fileMatch"] {
+                Value::String(s) => vec![json!(s)],
+                Value::Array(a) => a.clone(),
+                _ => Vec::new(),
+            };
+            let uri = match e["url"].as_str() {
+                Some(u) if u.contains("://") => u.to_string(),
+                Some(u) if u.starts_with('/') => format!("file://{u}"),
+                Some(u) => format!("file://{}", folder?.join(u.trim_start_matches("./")).display()),
+                None => format!("orbvane://schemas/setting/{i}"),
+            };
+            let mut entry = json!({ "fileMatch": file_match, "uri": uri });
+            if e["schema"].is_object() {
+                entry["schema"] = e["schema"].clone();
+            } else if e["url"].is_null() {
+                return None;
+            }
+            Some(entry)
+        })
+        .collect()
+}
+
 pub fn associations(themes: &[String]) -> Value {
     let user = settings::user_data_dir().join("User");
     let user_file = |name: &str| user.join(name).to_string_lossy().into_owned();
@@ -270,5 +299,24 @@ mod tests {
         assert_eq!(problems(&langs, r#"[{ "id": "x", "grammar": "cobol" }]"#).len(), 1);
         let ws = workspace(&settings);
         assert!(problems(&ws, r#"{ "folders": [{ "path": "." }], "settings": { "editor.tabSize": 2 }, "tasks": { "version": "2.0.0", "tasks": [] } }"#).is_empty());
+    }
+
+    #[test]
+    fn schemas_from_the_setting() {
+        let setting = json!([
+            { "fileMatch": ["*.conf.json"], "url": "./schemas/conf.json" },
+            { "fileMatch": "/app/x.json", "url": "https://example.com/x.json" },
+            { "fileMatch": ["a.json"], "schema": { "type": "object" } },
+            { "fileMatch": ["nothing.json"] },
+        ]);
+        let got = from_setting(&setting, Some(std::path::Path::new("/w")));
+        assert_eq!(
+            Value::Array(got),
+            json!([
+                { "fileMatch": ["*.conf.json"], "uri": "file:///w/schemas/conf.json" },
+                { "fileMatch": ["/app/x.json"], "uri": "https://example.com/x.json" },
+                { "fileMatch": ["a.json"], "uri": "orbvane://schemas/setting/2", "schema": { "type": "object" } },
+            ])
+        );
     }
 }

@@ -746,9 +746,6 @@ impl Workbench {
             tools: Default::default(),
         };
         wb.apply_settings();
-        // The built-in JSON server's schemas (settings, keybindings, launch, tasks...).
-        let themes: Vec<String> = wb.themes().into_iter().map(|t| t.name).collect();
-        wb.lsp.set_builtin_options("builtin:json", crate::json_schemas::associations(&themes));
         if let Err(e) = crate::keymap::load() {
             wb.set_status_message(&e);
         }

@@ -584,8 +584,7 @@ impl Workbench {
     /// and the Settings editor pick up what they contribute.
     fn extensions_changed(&mut self) {
         self.reload_keymap(true);
-        let themes: Vec<String> = self.themes().into_iter().map(|t| t.name).collect();
-        self.lsp.set_builtin_options("builtin:json", crate::json_schemas::associations(&themes));
+        self.update_json_options();
         self.extensions.icons.clear();
     }
 

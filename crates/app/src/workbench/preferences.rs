@@ -80,6 +80,25 @@ impl Workbench {
         self.font_family = self.settings.string("editor.fontFamily");
         self.ui_mono = self.settings.string("workbench.interfaceFont") != "system";
         self.ext_settings_changed();
+        self.update_json_options();
+    }
+
+    /// Hands the built-in JSON server its schemas (the editor's files, extensions', the
+    /// `json.schemas` setting) and download settings; a running one restarts when they changed.
+    pub(super) fn update_json_options(&mut self) {
+        let themes: Vec<String> = self.themes().into_iter().map(|t| t.name).collect();
+        let mut options = crate::json_schemas::associations(&themes);
+        let folder = self.folders().into_iter().next();
+        let own = crate::json_schemas::from_setting(&self.settings.get("json.schemas"), folder.as_deref());
+        if let Some(list) = options["schemas"].as_array_mut() {
+            list.extend(own);
+        }
+        options["download"] = serde_json::json!(self.settings.bool("json.schemaDownload.enable"));
+        options["cache"] = serde_json::json!(settings::user_data_dir().join("Cache/json-schemas"));
+        if self.lsp.set_builtin_options("builtin:json", options) {
+            let running: Vec<_> = self.lsp.running().into_iter().filter(|k| k.0 == "builtin:json").collect();
+            self.lsp.restart(&running);
+        }
     }
 
     /// Built-in themes, then extensions' themes and the user's theme files

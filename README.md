@@ -118,7 +118,7 @@ peek, call and type hierarchies, rename, code actions (⌘. or the lightbulb), f
 save), semantic highlighting, inlay hints, code lenses and workspace symbols.
 
 **Built in, nothing to install:** our own servers for **JSON** (with schemas for the editor's own
-files, and `"$schema"`), **HTML** (with Format Document: inline content kept on one line, `<style>`
+files, and `"$schema"`, local or downloaded, and the `json.schemas` setting), **HTML** (with Format Document: inline content kept on one line, `<style>`
 formatted as CSS; JavaScript in `<script>` gets completion, hovers, signature help,
 go to definition and errors from the JavaScript server), and **CSS, SCSS and Less** (completion and hovers from browser
 data with MDN descriptions, lint warnings, colors, rename).

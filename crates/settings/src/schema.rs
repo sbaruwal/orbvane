@@ -36,6 +36,7 @@ pub enum Section {
     Emmet,
     Git,
     Html,
+    Json,
     LldbDap,
     /// An extension's settings (an index into the extension sections, see `extend`).
     Extension(u16),
@@ -62,6 +63,7 @@ impl Section {
             Section::Emmet => "Emmet",
             Section::Git => "Git",
             Section::Html => "HTML",
+            Section::Json => "JSON",
             Section::LldbDap => "LLDB DAP",
             Section::Extension(i) => EXTENSION_SECTIONS.read().unwrap_or_else(|e| e.into_inner())[i as usize],
         }
@@ -934,6 +936,20 @@ fn builtin() -> Vec<Setting> {
                 kind: Kind::Bool,
                 section: Section::Html,
                 description: "Enable/disable auto creation of quotes for HTML attribute assignment. The type of quotes can be configured by `#html.completion.attributeDefaultValue#`.",
+            },
+            Setting {
+                key: "json.schemas",
+                default: "[]",
+                kind: Kind::Json(r#"{ "type": "array", "items": { "type": "object", "properties": { "fileMatch": { "type": "array", "items": { "type": "string" }, "description": "File patterns: a name like `*.conf.json`, or the end of a path like `/config/app.json`." }, "url": { "type": "string", "description": "A schema URL, absolute path, or path relative to the first workspace folder." }, "schema": { "type": "object", "description": "The schema itself." } } } }"#),
+                section: Section::Json,
+                description: "Associate schemas to JSON files in the current project.",
+            },
+            Setting {
+                key: "json.schemaDownload.enable",
+                default: "true",
+                kind: Kind::Bool,
+                section: Section::Json,
+                description: "When enabled, JSON schemas can be fetched from http and https locations.",
             },
             Setting {
                 key: "lldb-dap.executable-path",

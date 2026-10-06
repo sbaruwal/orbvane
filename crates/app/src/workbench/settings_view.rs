@@ -62,6 +62,7 @@ const BUILTIN_TOC: &[(&str, u8, Option<Section>)] = &[
     ("Emmet", 1, Some(Section::Emmet)),
     ("Git", 1, Some(Section::Git)),
     ("HTML", 1, Some(Section::Html)),
+    ("JSON", 1, Some(Section::Json)),
     ("LLDB DAP", 1, Some(Section::LldbDap)),
 ];
 
