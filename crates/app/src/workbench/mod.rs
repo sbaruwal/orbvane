@@ -566,10 +566,10 @@ pub struct Workbench {
     rename: Option<refactor::RenameWidget>,
     /// A rename waiting for the server's `prepareRename`: (group, document, position).
     rename_request: Option<(usize, usize, text::Pos)>,
-    /// A code action request waiting for its answer: (group, document, cursor).
-    code_action_request: Option<(usize, usize, text::Pos)>,
-    /// The actions in the open code action menu, with the server's encoding and key.
-    code_actions: Option<(Vec<lsp::CodeAction>, lsp::Encoding, crate::servers::ServerKey)>,
+    /// Quick Fix waiting for its answers.
+    code_action_request: Option<refactor::ActionRequest>,
+    /// The actions in the open code action menu.
+    code_actions: Option<Vec<refactor::Action>>,
     /// The edit sequence each file's diagnostics are anchored to (see `shift_diagnostics`).
     diag_seq: std::collections::HashMap<PathBuf, u64>,
     /// Documents waiting for format on save, and since when.

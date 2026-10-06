@@ -1,6 +1,6 @@
 //! The TODO Tree example (`examples/extensions/todo-tree`, built by `cargo build`) against the
-//! editor: its tree views, decorations, diagnostics, hover, completion and definition providers,
-//! and an inline tree item action.
+//! editor: its tree views, decorations, diagnostics, hover, completion, definition, code action
+//! and formatting providers, and an inline tree item action.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -114,6 +114,25 @@ fn runs_the_todo_tree_example() {
     wb.ext_tree_click(todos, TreeHit::Inline(row as u32, 0), 0.0, 0.0);
     wait_for(&mut wb, "the edit", |wb| wb.active_doc().unwrap().buffer.line(1).starts_with("DONE: first"));
     wait_for(&mut wb, "the tree to follow", |wb| labels(wb, todos) == ["notes.txt", "  broken, see notes.txt:1"]);
+
+    // Quick Fix on the FIXME: the extension's Mark as Done, which edits the file.
+    if let Some((ed, _)) = wb.active_mut() {
+        ed.set_selection(Selection::caret(Pos::new(2, 0)));
+    }
+    assert!(wb.active_doc().unwrap().buffer.line(2).starts_with("# FIXME"));
+    wb.quick_fix();
+    wait_for(&mut wb, "the code actions", |wb| wb.code_actions.is_some());
+    let titles: Vec<String> = wb.code_actions.as_ref().unwrap().iter().map(|(a, _)| a.title.clone()).collect();
+    assert_eq!(titles, ["Mark FIXME as Done"]);
+    wb.run_code_action(0);
+    assert!(wb.active_doc().unwrap().buffer.line(2).starts_with("# DONE: broken"));
+
+    // Format Document in a .todo file (no language server) uses its formatter.
+    let list = ws.join("list.todo");
+    std::fs::write(&list, "todo: write tests   \nFIXME: ok\n").unwrap();
+    wb.open_file(&list);
+    wb.format_active(false);
+    wait_for(&mut wb, "the formatting", |wb| wb.active_doc().unwrap().buffer.text() == "TODO: write tests\nFIXME: ok\n");
 
     // Stopping it removes what it added.
     wb.ext_stop(&id);

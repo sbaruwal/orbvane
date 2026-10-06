@@ -49,6 +49,10 @@ pub struct GalleryExtension {
     pub download: Option<String>,
     /// The package's SHA-256: a URL to a file holding it (Open VSX), or the hex digest itself.
     pub sha256: Option<String>,
+    /// Open VSX's signature of the package (a zip holding `.signature.sig`) and the key that
+    /// made it (PEM), as URLs.
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
     pub readme: Option<String>,
     pub changelog: Option<String>,
     pub manifest: Option<String>,
@@ -92,6 +96,8 @@ impl GalleryExtension {
             icon: opt(files, "icon"),
             download: opt(files, "download"),
             sha256: opt(files, "sha256"),
+            signature: opt(files, "signature"),
+            public_key: opt(files, "publicKey"),
             readme: opt(files, "readme"),
             changelog: opt(files, "changelog"),
             manifest: opt(files, "manifest"),
@@ -311,7 +317,30 @@ pub fn download(ext: &GalleryExtension, dest: &Path) -> Result<(), String> {
             return Err(format!("The package of {} is damaged (its checksum doesn't match).", ext.display_name));
         }
     }
+    if let (Some(signature), Some(key)) = (&ext.signature, &ext.public_key) {
+        if let Err(e) = check_signature(dest, signature, key) {
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("{} wasn't installed: {e}", ext.display_name));
+        }
+    }
     Ok(())
+}
+
+/// Checks the package at `path` against the registry's signature (`signature`: the URL of a zip
+/// holding `.signature.sig`; `key`: the URL of the registry's Ed25519 key).
+fn check_signature(path: &Path, signature: &str, key: &str) -> Result<(), String> {
+    let key = crate::ed25519::key_from_pem(&get_text(key)?).ok_or("the registry's signing key couldn't be read")?;
+    let sigzip = path.with_extension("sigzip");
+    std::fs::write(&sigzip, get(signature)?).map_err(|e| e.to_string())?;
+    let out = Command::new("/usr/bin/unzip").args(["-p"]).arg(&sigzip).arg(".signature.sig").output();
+    let _ = std::fs::remove_file(&sigzip);
+    let sig: [u8; 64] = out.ok().filter(|o| o.status.success()).and_then(|o| o.stdout.try_into().ok()).ok_or("its signature couldn't be read")?;
+    let mut file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+    match crate::ed25519::verify_reader(&key, &sig, &mut file) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err("its signature doesn't match the package (it was changed after it was published).".into()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 /// A download in progress: where the package goes in the extensions folder.
@@ -428,6 +457,23 @@ mod tests {
         assert_eq!(id, "acme.theme-x");
         assert!(Registry::scan(&reg.dir).gallery.contains("acme.theme-x"));
 
+        // A package whose signature doesn't match is refused.
+        let sig_dir = root.join("sig");
+        std::fs::create_dir_all(&sig_dir).unwrap();
+        std::fs::write(sig_dir.join(".signature.sig"), [7u8; 64]).unwrap();
+        assert!(Command::new("/usr/bin/zip").current_dir(&sig_dir).args(["-q", "../x.sigzip", ".signature.sig"]).status().unwrap().success());
+        let sigzip = std::fs::read(root.join("x.sigzip")).unwrap();
+        let key = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAje+vAaSS1zHV5WHCJSa5UXvxRo6+yerEU3IEmtuEuF4=\n-----END PUBLIC KEY-----\n";
+        let signed = serve(|_| vec![("/x.vsix".to_string(), bytes.clone()), ("/x.sigzip".to_string(), sigzip), ("/key".to_string(), key.as_bytes().to_vec())]);
+        let mut forged = d.clone();
+        forged.download = Some(format!("{signed}/x.vsix"));
+        forged.sha256 = None;
+        forged.signature = Some(format!("{signed}/x.sigzip"));
+        forged.public_key = Some(format!("{signed}/key"));
+        let err = download(&forged, &dest).unwrap_err();
+        assert!(err.contains("signature doesn't match"), "{err}");
+        assert!(!dest.exists());
+
         // A damaged download is refused.
         let mut bad = d.clone();
         bad.sha256 = Some(format!("{base}/x.vsix"));
@@ -445,6 +491,12 @@ mod tests {
         let d = details(OPEN_VSX, "rust-lang", "rust-analyzer").unwrap();
         assert_eq!(d.target_platform, target_platform());
         assert!(d.download.is_some() && d.sha256.is_some());
+        // A real package passes its signature check.
+        let yaml = details(OPEN_VSX, "redhat", "vscode-yaml").unwrap();
+        assert!(yaml.signature.is_some() && yaml.public_key.is_some());
+        let dest = std::env::temp_dir().join(format!("orbvane-live-{}.vsix", std::process::id()));
+        download(&yaml, &dest).unwrap();
+        let _ = std::fs::remove_file(&dest);
         let popular = search(OPEN_VSX, &Query::default(), 0, 3).unwrap();
         assert!(popular.extensions[0].downloads >= popular.extensions[1].downloads);
     }

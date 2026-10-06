@@ -41,7 +41,11 @@
 //! `executeCommand` (`command`, `arguments`), `treeView/getChildren` (`viewId`, `element`: an
 //! item id or null for the roots; answered with tree items), `provideHover`,
 //! `provideCompletionItems` (with `triggerCharacter`) and `provideDefinition` (`provider`,
-//! `document` with its text, `position`) and `shutdown`, and notifications `exit`,
+//! `document` with its text, `position`), `provideCodeActions` (`provider`, `document`,
+//! `range`, `context`: `{ "diagnostics" }`; answered with LSP `CodeAction`s whose `command` is
+//! `{ "command", "arguments" }`), `provideDocumentFormattingEdits` (`provider`, `document`,
+//! `options`: `{ "tabSize", "insertSpaces" }`, `range` or null; answered with `TextEdit`s) and
+//! `shutdown`, and notifications `exit`,
 //! `didOpenTextDocument`, `didChangeTextDocument`, `didSaveTextDocument`, `didCloseTextDocument`
 //! (`document`), `didChangeActiveTextEditor` (`editor` or null), `didChangeTextEditorSelection`
 //! (`editor`), `didChangeConfiguration` and `didChangeWorkspaceFolders` (`folders`).
@@ -60,7 +64,8 @@
 //! (`contributes.views`, in the Explorer or a `viewsContainers.activitybar` container);
 //! `window/createTextEditorDecorationType` (`key`, `options`), `window/setDecorations` (`key`,
 //! `path`, `decorations`: `[{ "range", "hoverMessage" }]`) and `window/disposeDecorationType`;
-//! `languages/registerProvider` (`id`, `kind`: `hover`, `completion` or `definition`, `selector`:
+//! `languages/registerProvider` (`id`, `kind`: `hover`, `completion`, `definition`,
+//! `codeAction` or `formatting`, `selector`:
 //! language ids, `"*"` or `{ "language", "pattern" }`, `triggerCharacters`);
 //! `languages/setDiagnostics` (`collection`, `path`, `diagnostics`: `[{ "range", "severity"` 1
 //! error .. 4 hint`, "message", "source", "code" }]`) and `languages/clearDiagnostics`
@@ -179,6 +184,10 @@ pub struct TextEdit {
 }
 
 impl TextEdit {
+    fn to_json(&self) -> Value {
+        json!({ "range": self.range.to_json(), "newText": self.new_text })
+    }
+
     pub fn replace(range: Range, new_text: impl Into<String>) -> Self {
         TextEdit { range, new_text: new_text.into() }
     }
@@ -216,7 +225,7 @@ impl WorkspaceEdit {
     fn to_json(&self) -> Value {
         let mut changes = serde_json::Map::new();
         for (path, edits) in &self.changes {
-            let edits: Vec<Value> = edits.iter().map(|e| json!({ "range": e.range.to_json(), "newText": e.new_text })).collect();
+            let edits: Vec<Value> = edits.iter().map(TextEdit::to_json).collect();
             changes.insert(file_uri(path), edits.into());
         }
         json!({ "changes": changes })
@@ -528,6 +537,61 @@ impl Diagnostic {
     fn to_json(&self) -> Value {
         json!({ "range": self.range.to_json(), "severity": self.severity as u8, "message": self.message, "source": self.source, "code": self.code })
     }
+
+    fn from_json(v: &Value) -> Self {
+        let severity = match v["severity"].as_u64() {
+            Some(2) => DiagnosticSeverity::Warning,
+            Some(3) => DiagnosticSeverity::Information,
+            Some(4) => DiagnosticSeverity::Hint,
+            _ => DiagnosticSeverity::Error,
+        };
+        let code = match &v["code"] {
+            Value::String(s) => Some(s.clone()),
+            Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        };
+        Diagnostic { range: Range::from_json(&v["range"]), severity, message: v["message"].as_str().unwrap_or("").to_string(), source: v["source"].as_str().map(String::from), code }
+    }
+}
+
+/// A fix or refactoring offered at a range (`Extension::provide_code_actions`): its edits are
+/// applied, then its command runs.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CodeAction {
+    pub title: String,
+    /// `"quickfix"`, `"refactor"`, `"refactor.extract"`, `"source"`... (groups the menu; quick
+    /// fixes first).
+    pub kind: Option<String>,
+    pub edit: Option<WorkspaceEdit>,
+    pub command: Option<CommandCall>,
+    /// The fix to pick when there are several.
+    pub is_preferred: bool,
+    /// The problems it fixes.
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl CodeAction {
+    pub fn quick_fix(title: impl Into<String>, edit: WorkspaceEdit) -> Self {
+        CodeAction { title: title.into(), kind: Some("quickfix".into()), edit: Some(edit), ..Default::default() }
+    }
+
+    fn to_json(&self) -> Value {
+        json!({
+            "title": self.title,
+            "kind": self.kind,
+            "edit": self.edit.as_ref().map(WorkspaceEdit::to_json),
+            "command": self.command.as_ref().map(|c| json!({ "title": self.title, "command": c.command, "arguments": c.arguments })),
+            "isPreferred": self.is_preferred,
+            "diagnostics": self.diagnostics.iter().map(Diagnostic::to_json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+/// How the user indents (`Extension::provide_formatting`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FormattingOptions {
+    pub tab_size: u32,
+    pub insert_spaces: bool,
 }
 
 /// What a hover provider shows (Markdown).
@@ -880,6 +944,17 @@ impl Context {
         self.register_provider(id, "definition", selector, &[]);
     }
 
+    /// Quick Fix and the lightbulb in matching documents ask `Extension::provide_code_actions`.
+    pub fn register_code_action_provider(&mut self, id: &str, selector: &[DocumentFilter]) {
+        self.register_provider(id, "codeAction", selector, &[]);
+    }
+
+    /// Format Document (and format on save) in matching documents asks
+    /// `Extension::provide_formatting` when no language server formats them.
+    pub fn register_formatting_provider(&mut self, id: &str, selector: &[DocumentFilter]) {
+        self.register_provider(id, "formatting", selector, &[]);
+    }
+
     /// Sets a file's problems in a collection (an empty list clears them).
     pub fn set_diagnostics(&mut self, collection: &str, path: &std::path::Path, diagnostics: &[Diagnostic]) {
         let diagnostics: Vec<Value> = diagnostics.iter().map(Diagnostic::to_json).collect();
@@ -932,6 +1007,17 @@ pub trait Extension: Sized {
     fn provide_definition(&mut self, _ctx: &mut Context, _provider: &str, _doc: &Document, _pos: Position) -> Vec<Location> {
         Vec::new()
     }
+
+    /// The fixes and refactorings for `range`; `diagnostics` are the problems there.
+    fn provide_code_actions(&mut self, _ctx: &mut Context, _provider: &str, _doc: &Document, _range: Range, _diagnostics: &[Diagnostic]) -> Vec<CodeAction> {
+        Vec::new()
+    }
+
+    /// The edits that format the document (or `range` of it, for Format Selection).
+    fn provide_formatting(&mut self, _ctx: &mut Context, _provider: &str, _doc: &Document, _options: FormattingOptions, _range: Option<Range>) -> Vec<TextEdit> {
+        Vec::new()
+    }
+
     /// The editor is stopping the extension.
     fn deactivate(&mut self, _ctx: &mut Context) {}
 }
@@ -1015,6 +1101,20 @@ pub fn run_with<E: Extension>(input: Box<dyn BufRead>, out: Box<dyn Write>) {
                             _ => Value::Array(e.provide_definition(&mut ctx, &provider, &d, pos).iter().map(Location::to_json).collect()),
                         };
                         reply(&mut ctx, Ok(result));
+                    }
+                    "provideCodeActions" => {
+                        let provider = params["provider"].as_str().unwrap_or("").to_string();
+                        let diagnostics: Vec<Diagnostic> = params["context"]["diagnostics"].as_array().into_iter().flatten().map(Diagnostic::from_json).collect();
+                        let actions = e.provide_code_actions(&mut ctx, &provider, &doc(), Range::from_json(&params["range"]), &diagnostics);
+                        reply(&mut ctx, Ok(Value::Array(actions.iter().map(CodeAction::to_json).collect())));
+                    }
+                    "provideDocumentFormattingEdits" => {
+                        let provider = params["provider"].as_str().unwrap_or("").to_string();
+                        let o = &params["options"];
+                        let options = FormattingOptions { tab_size: o["tabSize"].as_u64().unwrap_or(4) as u32, insert_spaces: o["insertSpaces"].as_bool().unwrap_or(true) };
+                        let range = params["range"].is_object().then(|| Range::from_json(&params["range"]));
+                        let edits = e.provide_formatting(&mut ctx, &provider, &doc(), options, range);
+                        reply(&mut ctx, Ok(Value::Array(edits.iter().map(TextEdit::to_json).collect())));
                     }
                     "didOpenTextDocument" => e.did_open(&mut ctx, &doc()),
                     "didChangeTextDocument" => e.did_change(&mut ctx, &doc()),

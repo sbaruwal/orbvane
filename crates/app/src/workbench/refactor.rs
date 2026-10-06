@@ -59,6 +59,26 @@ fn map_index(p: usize, edits: &[(usize, usize, usize)]) -> usize {
     (p as isize + shift).max(0) as usize
 }
 
+/// Where a code action came from: a language server (with its position encoding), or an
+/// extension's provider (UTF-8 positions; its command runs in the extension).
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum ActionSource {
+    Server(crate::servers::ServerKey, Encoding),
+    Extension(String),
+}
+
+pub(super) type Action = (lsp::CodeAction, ActionSource);
+
+/// Quick Fix waiting for answers: where it was asked (group, document, cursor), how many
+/// answers are still to come, and the actions so far.
+pub(super) struct ActionRequest {
+    pub g: usize,
+    pub doc: usize,
+    pub head: Pos,
+    pub waiting: usize,
+    pub actions: Vec<Action>,
+}
+
 impl Workbench {
     /// Applies edits one document at a time, each as one undo step. Returns whether all of
     /// them could be applied.
@@ -159,11 +179,15 @@ impl Workbench {
         let (doc_id, (a, z)) = (ed.doc, ed.sel.ordered());
         let Some(path) = self.docs[doc_id].as_ref().and_then(|d| d.buffer.path()).map(Path::to_path_buf) else { return };
         let capability = if selection && a != z { "documentRangeFormattingProvider" } else { "documentFormattingProvider" };
+        let range = (selection && a != z).then_some((a, z));
         if !self.lsp.has_server(&path) || !self.lsp.supports(&path, capability) {
+            // An extension's formatter, if there's one.
+            if self.ext_provide_formatting(doc_id, range, false) {
+                return;
+            }
             let what = if selection { "selection" } else { "document" };
             return self.set_status_message(&format!("There is no formatter for this {what}."));
         }
-        let range = (selection && a != z).then_some((a, z));
         let doc = self.docs[doc_id].as_ref().unwrap();
         self.lsp.format(&path, &doc.buffer, range, Self::formatting_options(), false);
     }
@@ -176,11 +200,13 @@ impl Workbench {
         }
         let Some(doc) = self.docs.get(doc_id).and_then(Option::as_ref) else { return false };
         let Some(path) = doc.buffer.path().map(Path::to_path_buf) else { return false };
-        if !self.lsp.has_server(&path) || !self.lsp.supports(&path, "documentFormattingProvider") {
-            return false;
-        }
-        let doc = self.docs[doc_id].as_ref().unwrap();
-        if !self.lsp.format(&path, &doc.buffer, None, Self::formatting_options(), true) {
+        let asked = if self.lsp.has_server(&path) && self.lsp.supports(&path, "documentFormattingProvider") {
+            let doc = self.docs[doc_id].as_ref().unwrap();
+            self.lsp.format(&path, &doc.buffer, None, Self::formatting_options(), true)
+        } else {
+            self.ext_provide_formatting(doc_id, None, true)
+        };
+        if !asked {
             return false;
         }
         self.format_saves.insert(doc_id, std::time::Instant::now());
@@ -223,51 +249,54 @@ impl Workbench {
     pub(super) fn quick_fix(&mut self) {
         let Some(ed) = self.active_editor().filter(|e| !e.is_special()) else { return };
         let (doc_id, range, head) = (ed.doc, ed.sel.ordered(), ed.sel.head);
-        if !self.request_code_actions(doc_id, range, None) {
+        let waiting = self.request_code_actions(doc_id, range, None);
+        if waiting == 0 {
             return self.set_status_message("No code actions available");
         }
-        self.code_action_request = Some((self.active_group, doc_id, head));
+        self.code_action_request = Some(ActionRequest { g: self.active_group, doc: doc_id, head, waiting, actions: Vec::new() });
     }
 
-    /// Asks the document's server for code actions at `range`, sending the diagnostics there.
-    /// Returns false when there's no server offering code actions.
-    pub(super) fn request_code_actions(&mut self, doc_id: usize, (a, z): (Pos, Pos), auto: Option<u64>) -> bool {
-        let Some(path) = self.docs[doc_id].as_ref().and_then(|d| d.buffer.path()).map(Path::to_path_buf) else { return false };
-        if !self.lsp.has_server(&path) || !self.lsp.supports(&path, "codeActionProvider") {
-            return false;
-        }
+    /// Asks the document's server and the extensions' providers for code actions at `range`,
+    /// sending the diagnostics there. Returns how many were asked.
+    pub(super) fn request_code_actions(&mut self, doc_id: usize, (a, z): (Pos, Pos), auto: Option<u64>) -> usize {
+        let Some(path) = self.docs[doc_id].as_ref().and_then(|d| d.buffer.path()).map(Path::to_path_buf) else { return 0 };
         // Diagnostics touching the range's lines (servers match them to their fixes).
-        let diagnostics: Vec<serde_json::Value> = self
+        let (encoding, diagnostics): (Encoding, Vec<lsp::Diagnostic>) = self
             .lsp
             .diagnostics
             .get(&path)
-            .map(|(_, ds)| {
-                ds.iter()
-                    .filter(|d| d.range.start.line as usize <= z.line && d.range.end.line as usize >= a.line)
-                    .map(|d| d.raw.clone())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let doc = self.docs[doc_id].as_ref().unwrap();
-        self.lsp.code_actions(&path, &doc.buffer, (a, z), diagnostics, auto);
-        true
+            .map(|(enc, ds)| (*enc, ds.iter().filter(|d| d.range.start.line as usize <= z.line && d.range.end.line as usize >= a.line).cloned().collect()))
+            .unwrap_or((Encoding::Utf8, Vec::new()));
+        let mut asked = 0;
+        if self.lsp.has_server(&path) && self.lsp.supports(&path, "codeActionProvider") {
+            let doc = self.docs[doc_id].as_ref().unwrap();
+            self.lsp.code_actions(&path, &doc.buffer, (a, z), diagnostics.iter().map(|d| d.raw.clone()).collect(), auto);
+            asked += 1;
+        }
+        asked + self.ext_provide_code_actions(doc_id, (a, z), &diagnostics, encoding, auto)
     }
 
-    /// Quick Fix's answer: the actions as a native menu below the cursor.
-    pub(super) fn show_code_actions(&mut self, actions: Vec<lsp::CodeAction>, encoding: Encoding, key: crate::servers::ServerKey) {
-        let Some((g, doc_id, head)) = self.code_action_request.take() else { return };
+    /// An answer to Quick Fix; the menu opens below the cursor once all have answered.
+    pub(super) fn code_action_answer(&mut self, actions: Vec<Action>) {
+        let Some(req) = &mut self.code_action_request else { return };
+        req.actions.extend(actions);
+        req.waiting = req.waiting.saturating_sub(1);
+        if req.waiting > 0 {
+            return;
+        }
+        let ActionRequest { g, doc: doc_id, head, actions, .. } = self.code_action_request.take().unwrap();
         if actions.is_empty() {
             return self.set_status_message("No code actions available");
         }
         let Some(ed) = self.groups.get(g).and_then(|gr| gr.tabs.get(gr.active)).filter(|e| e.doc == doc_id) else { return };
         let Some(doc) = self.docs[doc_id].as_ref() else { return };
         let (x, y) = ed.point_of(doc, head);
-        self.code_actions_menu(actions, encoding, key, x, y + crate::editor::line_height());
+        self.code_actions_menu(actions, x, y + crate::editor::line_height());
     }
 
     /// Shows code actions as a native menu at (x, y): quick fixes, then refactorings, then
     /// source actions, each group with the preferred one first.
-    pub(super) fn code_actions_menu(&mut self, actions: Vec<lsp::CodeAction>, encoding: Encoding, key: crate::servers::ServerKey, x: f32, y: f32) {
+    pub(super) fn code_actions_menu(&mut self, actions: Vec<Action>, x: f32, y: f32) {
         let rank = |a: &lsp::CodeAction| {
             let group = if a.kind.starts_with("quickfix") || a.kind.is_empty() {
                 0
@@ -279,11 +308,11 @@ impl Workbench {
             (group, !a.preferred)
         };
         let mut order: Vec<usize> = (0..actions.len()).collect();
-        order.sort_by_key(|&i| rank(&actions[i]));
+        order.sort_by_key(|&i| rank(&actions[i].0));
         let mut entries = Vec::new();
         let mut last_group = None;
         for &i in &order {
-            let a = &actions[i];
+            let a = &actions[i].0;
             let group = rank(a).0;
             if last_group.is_some_and(|g| g != group) {
                 entries.push((super::PopupItem::Separator, super::preferences::PopupAction::None));
@@ -292,32 +321,49 @@ impl Workbench {
             let item = super::PopupItem::Item { label: a.title.clone(), enabled: a.disabled.is_none(), checked: None };
             entries.push((item, super::preferences::PopupAction::CodeAction(i)));
         }
-        self.code_actions = Some((actions, encoding, key));
+        self.code_actions = Some(actions);
         self.show_popup(entries, x, y);
     }
 
     /// A code action was picked: apply its edit, then run its command (or fetch the edit
     /// first if the server left it out).
     pub(super) fn run_code_action(&mut self, i: usize) {
-        let Some((actions, encoding, key)) = self.code_actions.take() else { return };
-        let Some(action) = actions.get(i) else { return };
-        if action.edit.is_none() && action.command.is_none() {
-            return self.lsp.resolve_code_action(&key, action);
+        let Some(mut actions) = self.code_actions.take() else { return };
+        if i >= actions.len() {
+            return;
         }
-        self.finish_code_action(action.clone(), encoding, key);
+        let (action, source) = actions.swap_remove(i);
+        if let ActionSource::Server(key, _) = &source {
+            if action.edit.is_none() && action.command.is_none() {
+                return self.lsp.resolve_code_action(key, &action);
+            }
+        }
+        self.finish_code_action(action, source);
     }
 
-    pub(super) fn finish_code_action(&mut self, action: lsp::CodeAction, encoding: Encoding, key: crate::servers::ServerKey) {
+    pub(super) fn finish_code_action(&mut self, action: lsp::CodeAction, source: ActionSource) {
+        let encoding = match &source {
+            ActionSource::Server(_, encoding) => *encoding,
+            ActionSource::Extension(_) => Encoding::Utf8,
+        };
         if let Some(edit) = &action.edit {
             if !self.apply_workspace_edit(edit, encoding) {
                 self.set_status_message("Some edits couldn't be applied.");
             }
         }
-        if let Some(command) = &action.command {
-            if !self.lsp.execute_command(&key, command) && action.edit.is_none() {
-                let name = command["title"].as_str().or(command["command"].as_str()).unwrap_or("command");
-                self.set_status_message(&format!("\"{name}\" isn't supported in orbvane."));
+        let Some(command) = &action.command else { return };
+        let ran = match &source {
+            ActionSource::Server(key, _) => self.lsp.execute_command(key, command),
+            ActionSource::Extension(_) => {
+                let id = command["command"].as_str().unwrap_or("").to_string();
+                let args = command["arguments"].as_array().cloned().unwrap_or_default();
+                self.ext_execute(&id, args, None);
+                true
             }
+        };
+        if !ran && action.edit.is_none() {
+            let name = command["title"].as_str().or(command["command"].as_str()).unwrap_or("command");
+            self.set_status_message(&format!("\"{name}\" isn't supported in orbvane."));
         }
     }
 

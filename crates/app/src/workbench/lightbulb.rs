@@ -4,12 +4,11 @@
 
 use std::time::{Duration, Instant};
 
-use lsp::Encoding;
 use text::Selection;
 
+use super::refactor::Action;
 use super::Workbench;
 use crate::config::{self, Lightbulb as Mode};
-use crate::servers::ServerKey;
 
 /// How long the cursor rests before asking.
 const DELAY: Duration = Duration::from_millis(250);
@@ -35,9 +34,9 @@ struct Shown {
     doc: usize,
     version: u64,
     line: usize,
-    actions: Vec<lsp::CodeAction>,
-    encoding: Encoding,
-    key: ServerKey,
+    /// The request it answers.
+    seq: u64,
+    actions: Vec<Action>,
     /// A preferred quick fix exists (lightbulb gets the autofix look).
     autofix: bool,
 }
@@ -63,7 +62,7 @@ impl Workbench {
         let ed = self.active_editor().filter(|e| !e.is_special())?;
         let doc = self.docs[ed.doc].as_ref()?;
         let path = doc.buffer.path()?;
-        if !self.lsp.has_server(path) || !self.lsp.supports(path, "codeActionProvider") {
+        if !(self.lsp.has_server(path) && self.lsp.supports(path, "codeActionProvider")) && !self.ext_has_code_actions(ed.doc) {
             return None;
         }
         if mode == Mode::OnCode && ed.sel.is_empty() && doc.buffer.line(ed.sel.head.line).trim().is_empty() {
@@ -112,19 +111,24 @@ impl Workbench {
         self.lightbulb.due
     }
 
-    /// The server's answer for request `seq`: shows the lightbulb if there's something to do
-    /// (source actions like Organize Imports don't count).
-    pub(super) fn lightbulb_actions(&mut self, seq: u64, actions: Vec<lsp::CodeAction>, encoding: Encoding, key: ServerKey) {
+    /// An answer (the server's or an extension's) for request `seq`: shows the lightbulb if
+    /// there's something to do (source actions like Organize Imports don't count).
+    pub(super) fn lightbulb_actions(&mut self, seq: u64, actions: Vec<Action>) {
         let lb = &mut self.lightbulb;
         let Some((g, doc, version, sel)) = lb.asked.filter(|_| seq == lb.seq) else { return };
-        let actions: Vec<lsp::CodeAction> =
-            actions.into_iter().filter(|a| a.disabled.is_none() && !a.kind.starts_with("source")).collect();
+        let actions: Vec<Action> = actions.into_iter().filter(|(a, _)| a.disabled.is_none() && !a.kind.starts_with("source")).collect();
+        // Answers to the same request add up.
+        if let Some(sh) = lb.shown.as_mut().filter(|sh| sh.seq == seq) {
+            sh.actions.extend(actions);
+            sh.autofix = sh.actions.iter().any(|(a, _)| a.preferred && a.kind.starts_with("quickfix"));
+            return;
+        }
         if actions.is_empty() {
             lb.shown = None;
             return;
         }
-        let autofix = actions.iter().any(|a| a.preferred && a.kind.starts_with("quickfix"));
-        lb.shown = Some(Shown { g, doc, version, line: sel.head.line, actions, encoding, key, autofix });
+        let autofix = actions.iter().any(|(a, _)| a.preferred && a.kind.starts_with("quickfix"));
+        lb.shown = Some(Shown { g, doc, version, line: sel.head.line, seq, actions, autofix });
     }
 
     /// The lightbulb to draw in group `g`'s editor showing `doc`: (line, autofix).
@@ -141,8 +145,8 @@ impl Workbench {
         let anchor = self.groups[g].tabs.get(self.groups[g].active).and_then(|e| e.geom.lightbulb);
         match anchor.filter(|_| fresh) {
             Some(r) => {
-                let (actions, encoding, key) = (sh.actions.clone(), sh.encoding, sh.key.clone());
-                self.code_actions_menu(actions, encoding, key, r.x, r.bottom());
+                let actions = sh.actions.clone();
+                self.code_actions_menu(actions, r.x, r.bottom());
             }
             None => self.quick_fix(),
         }

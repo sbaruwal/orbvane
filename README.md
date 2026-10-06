@@ -305,14 +305,16 @@ The Extensions view (⇧⌘X) installs from:
 - **[Open VSX](https://open-vsx.org):** their contributions (themes, snippets, languages...) work.
   Their JavaScript code doesn't run.
 
-Downloads are checked against the registry's SHA-256, and updates are installed automatically
+Downloads are checked against the registry's SHA-256 and, for Open VSX, against the signature it
+publishes with each package (Ed25519); a package that fails is not installed. Updates are installed automatically
 (`extensions.autoUpdate`).
 
 <details>
 <summary>Writing and publishing an extension</summary>
 
 See `examples/extensions/word-count` (a minimal one) and `examples/extensions/todo-tree` (views,
-decorations, providers and diagnostics). Implement `Extension` and call `orbvane_extension::run`.
+decorations, diagnostics, and hover, completion, definition, code action and formatting
+providers). Implement `Extension` and call `orbvane_extension::run`.
 
 ```bash
 cargo install --path crates/cargo-orbvane

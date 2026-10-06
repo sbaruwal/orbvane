@@ -233,10 +233,16 @@ impl Workbench {
             Event::AutoInsert { path, version, pos, snippet } => self.auto_insert_arrived(&path, version, pos, &snippet),
             Event::LinkedEditing { seq, ranges, word_pattern, encoding } => self.linked_editing_arrived(seq, ranges, word_pattern, encoding),
             Event::WorkspaceSymbols { seq, symbols, encoding } => self.workspace_symbols_arrived(seq, symbols, encoding),
-            Event::CodeActions { actions, encoding, key, auto: None } => self.show_code_actions(actions, encoding, key),
-            Event::CodeActions { actions, encoding, key, auto: Some(seq) } => self.lightbulb_actions(seq, actions, encoding, key),
+            Event::CodeActions { actions, encoding, key, auto } => {
+                let source = super::refactor::ActionSource::Server(key, encoding);
+                let actions = actions.into_iter().map(|a| (a, source.clone())).collect();
+                match auto {
+                    None => self.code_action_answer(actions),
+                    Some(seq) => self.lightbulb_actions(seq, actions),
+                }
+            }
             Event::Formatted { path, version, edits, encoding, save } => self.formatted(&path, version, edits, encoding, save),
-            Event::ResolvedAction { action, encoding, key } => self.finish_code_action(action, encoding, key),
+            Event::ResolvedAction { action, encoding, key } => self.finish_code_action(action, super::refactor::ActionSource::Server(key, encoding)),
             Event::Completion { seq, items, incomplete, encoding } => {
                 let Some(comp) = &mut self.completion else { return };
                 if comp.seq != seq {

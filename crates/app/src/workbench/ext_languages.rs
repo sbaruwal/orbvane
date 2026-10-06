@@ -1,8 +1,10 @@
-//! Language features from extensions' code: hover, completion and definition providers
-//! (`languages/registerProvider`, asked with `provideHover`, `provideCompletionItems` and
-//! `provideDefinition`), and diagnostics (`languages/setDiagnostics`). Answers join the
-//! language server's: hovers are stacked under it, suggestions are added to its list, and
-//! definitions are asked when there's no server or it found none. Positions are UTF-8 columns.
+//! Language features from extensions' code: hover, completion, definition, code action and
+//! formatting providers (`languages/registerProvider`, asked with `provideHover`,
+//! `provideCompletionItems`, `provideDefinition`, `provideCodeActions` and
+//! `provideDocumentFormattingEdits`), and diagnostics (`languages/setDiagnostics`). Answers join
+//! the language server's: hovers are stacked under it, suggestions and code actions are added
+//! to its lists, definitions are asked when there's no server or it found none, and formatters
+//! are used for files no server formats. Positions are UTF-8 columns.
 //!
 //! Extensions' diagnostics live in `diagnostics` and are merged into `Servers::diagnostics` (the
 //! one place the editor reads them), tagged with `orbvaneCollection` in `raw` so they can be
@@ -144,6 +146,69 @@ impl Workbench {
             return false;
         }
         self.ext_provide("definition", "provideDefinition", doc, pos, json!({}), || super::ext_host::Waiter::Definition) > 0
+    }
+
+    pub(super) fn ext_has_code_actions(&self, doc: usize) -> bool {
+        !self.ext_providers_for("codeAction", doc).is_empty()
+    }
+
+    /// Asks the code action providers for document `doc` about `range`, with the
+    /// `diagnostics` there (in `encoding`, sent as UTF-8). Returns how many were asked.
+    pub(super) fn ext_provide_code_actions(&mut self, doc: usize, (a, z): (Pos, Pos), diagnostics: &[lsp::Diagnostic], encoding: Encoding, auto: Option<u64>) -> usize {
+        let providers = self.ext_providers_for("codeAction", doc);
+        let Some(d) = self.docs.get(doc).and_then(Option::as_ref).filter(|_| !providers.is_empty()) else { return 0 };
+        let document = super::ext_host::doc_json(d, true);
+        let at = |p: Pos| json!({ "line": p.line, "character": Encoding::Utf8.to_lsp(&d.buffer.line(p.line), p.col) });
+        let range = json!({ "start": at(a), "end": at(z) });
+        let utf8 = |p: lsp::Position| {
+            let line = d.buffer.line(p.line as usize);
+            json!({ "line": p.line, "character": Encoding::Utf8.to_lsp(&line, encoding.from_lsp(&line, p.character)) })
+        };
+        let diagnostics: Vec<Value> = diagnostics
+            .iter()
+            .map(|g| {
+                let mut v = g.raw.clone();
+                if !v.is_object() {
+                    v = json!({ "message": g.message });
+                }
+                v["range"] = json!({ "start": utf8(g.range.start), "end": utf8(g.range.end) });
+                v
+            })
+            .collect();
+        for p in &providers {
+            let params = json!({ "provider": p.id, "document": document, "range": range, "context": { "diagnostics": diagnostics } });
+            self.ext_ask(&p.ext, "provideCodeActions", params, super::ext_host::Waiter::CodeActions { ext: p.ext.clone(), auto });
+        }
+        providers.len()
+    }
+
+    pub(super) fn ext_code_actions_answer(&mut self, ext: &str, auto: Option<u64>, result: Result<Value, String>) {
+        let source = super::refactor::ActionSource::Extension(ext.to_string());
+        let actions = result.map(|v| lsp::parse_code_actions(&v)).unwrap_or_default().into_iter().map(|a| (a, source.clone())).collect();
+        match auto {
+            None => self.code_action_answer(actions),
+            Some(seq) => self.lightbulb_actions(seq, actions),
+        }
+    }
+
+    /// Asks the first formatting provider for document `doc` to format it (or `range`); its
+    /// edits arrive like a server's (`formatted`). False if there's none.
+    pub(super) fn ext_provide_formatting(&mut self, doc: usize, range: Option<(Pos, Pos)>, save: bool) -> bool {
+        let Some(p) = self.ext_providers_for("formatting", doc).into_iter().next() else { return false };
+        let Some(d) = self.docs.get(doc).and_then(Option::as_ref) else { return false };
+        let Some(path) = d.buffer.path().map(Path::to_path_buf) else { return false };
+        let at = |p: Pos| json!({ "line": p.line, "character": Encoding::Utf8.to_lsp(&d.buffer.line(p.line), p.col) });
+        let range = range.map(|(a, z)| json!({ "start": at(a), "end": at(z) }));
+        let cfg = crate::config::get();
+        let params = json!({
+            "provider": p.id,
+            "document": super::ext_host::doc_json(d, true),
+            "options": { "tabSize": cfg.tab_size, "insertSpaces": cfg.insert_spaces },
+            "range": range,
+        });
+        let waiter = super::ext_host::Waiter::Formatting { path, version: d.buffer.version(), save };
+        self.ext_ask(&p.ext, "provideDocumentFormattingEdits", params, waiter);
+        true
     }
 
     /// The language server found no definition: ask the providers. Returns whether it did.

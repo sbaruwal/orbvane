@@ -8,6 +8,7 @@
 //! the editor runs and talks to over JSON-RPC (see the `orbvane-extension` crate).
 
 pub mod catalog;
+pub mod ed25519;
 pub mod gallery;
 pub mod manifest;
 

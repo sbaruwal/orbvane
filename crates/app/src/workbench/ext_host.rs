@@ -42,6 +42,10 @@ pub(super) enum Waiter {
     /// A completion provider, for completion request `seq`.
     Completion(u64),
     Definition,
+    /// Code actions from extension `ext`: for Quick Fix, or the lightbulb's request `seq`.
+    CodeActions { ext: String, auto: Option<u64> },
+    /// Formatting edits for the document at `path` at buffer `version` (`save`: format on save).
+    Formatting { path: std::path::PathBuf, version: u64, save: bool },
 }
 
 /// An extension's status bar entry.
@@ -352,6 +356,11 @@ impl Workbench {
                 Some(Waiter::Hover(doc, pos)) => self.ext_hover_answer(doc, pos, result),
                 Some(Waiter::Completion(seq)) => self.ext_completion_answer(seq, result),
                 Some(Waiter::Definition) => self.ext_definition_answer(result),
+                Some(Waiter::CodeActions { ext, auto }) => self.ext_code_actions_answer(&ext, auto, result),
+                Some(Waiter::Formatting { path, version, save }) => {
+                    let edits = result.map(|v| lsp::parse_text_edits(&v)).unwrap_or_default();
+                    self.formatted(&path, version, edits, Encoding::Utf8, save);
+                }
                 Some(Waiter::Nobody) => {
                     if let Err(e) = result {
                         self.notify(Severity::Error, &e, &ext.display_name, Vec::new(), None);

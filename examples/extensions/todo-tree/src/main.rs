@@ -1,15 +1,16 @@
 //! TODO Tree: an example Orbvane extension showing the views and language features API. It
 //! finds TODO and FIXME comments in the workspace and shows them in a tree view (its own
 //! activity bar container, and the Explorer), highlights them in editors (decorations), reports
-//! FIXMEs as problems (diagnostics), and adds a hover on tags, tag completions in comments and Go
-//! to Definition on `path:line` references in TODO comments.
+//! FIXMEs as problems (diagnostics), and adds a hover on tags, tag completions in comments, Go
+//! to Definition on `path:line` references in TODO comments, a Mark as Done quick fix, and a
+//! formatter for `.todo` files (tags in capitals, no trailing spaces).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use orbvane_extension::{
-    Collapsible, Color, CommandCall, CompletionItem, CompletionItemKind, Context, Decoration, DecorationOptions, Diagnostic, DiagnosticSeverity, Document, Extension, Hover, Location, Position, Range, TreeItem,
-    WorkspaceEdit,
+    CodeAction, Collapsible, Color, CommandCall, CompletionItem, CompletionItemKind, Context, Decoration, DecorationOptions, Diagnostic, DiagnosticSeverity, Document, DocumentFilter, Extension,
+    FormattingOptions, Hover, Location, Position, Range, TextEdit, TreeItem, WorkspaceEdit,
 };
 use serde_json::{json, Value};
 
@@ -61,6 +62,32 @@ fn find_todos(path: &Path, text: &str, tags: &[String]) -> Vec<Todo> {
     }
     out.sort_by_key(|t| (t.line, t.col));
     out
+}
+
+/// A `.todo` file's lines formatted: tags written in capitals (`todo:` → `TODO:`), trailing
+/// spaces removed. One edit per changed line.
+fn format_lines(text: &str, tags: &[String]) -> Vec<TextEdit> {
+    let mut edits = Vec::new();
+    for (n, line) in text.lines().enumerate() {
+        let mut new = line.trim_end().to_string();
+        for tag in tags {
+            let lower = tag.to_lowercase();
+            let mut from = 0;
+            while let Some(i) = new.to_lowercase()[from..].find(&lower) {
+                let at = from + i;
+                from = at + tag.len();
+                let word_start = new[..at].chars().next_back().is_none_or(|c| !c.is_alphanumeric());
+                if word_start && new[from..].starts_with(':') {
+                    new.replace_range(at..from, tag);
+                }
+            }
+        }
+        if new != line {
+            let end = Position::new(n as u32, line.len() as u32);
+            edits.push(TextEdit::replace(Range::new(Position::new(n as u32, 0), end), new));
+        }
+    }
+    edits
 }
 
 /// The text files under `dir` (skipping hidden and build folders).
@@ -210,6 +237,8 @@ impl Extension for TodoTree {
         ctx.register_hover_provider("todo-hover", &["*".into()]);
         ctx.register_completion_provider("todo-tags", &["*".into()], &[]);
         ctx.register_definition_provider("todo-links", &["*".into()]);
+        ctx.register_code_action_provider("todo-done", &["*".into()]);
+        ctx.register_formatting_provider("todo-format", &[DocumentFilter::Pattern("**/*.todo".into())]);
         ext.scan(ctx);
         ext
     }
@@ -329,6 +358,28 @@ impl Extension for TodoTree {
         self.tags.iter().map(|t| CompletionItem::new(t.clone(), CompletionItemKind::Keyword).detail("TODO Tree tag").snippet(format!("{t}: ${{1:what}}"))).collect()
     }
 
+    /// Mark as Done for the tags in `range` (preferred for a FIXME, which is a problem).
+    fn provide_code_actions(&mut self, _ctx: &mut Context, _provider: &str, doc: &Document, range: Range, diagnostics: &[Diagnostic]) -> Vec<CodeAction> {
+        let Some(path) = doc.path.clone() else { return Vec::new() };
+        let todos = find_todos(&path, doc.text.as_deref().unwrap_or(""), &self.tags);
+        todos
+            .into_iter()
+            .filter(|t| range.start.line <= t.line && t.line <= range.end.line)
+            .map(|t| {
+                let mut edit = WorkspaceEdit::new();
+                edit.replace(&path, t.range(), "DONE");
+                let mut action = CodeAction::quick_fix(format!("Mark {} as Done", t.tag), edit);
+                action.diagnostics = diagnostics.iter().filter(|d| d.range.start.line == t.line).cloned().collect();
+                action.is_preferred = !action.diagnostics.is_empty();
+                action
+            })
+            .collect()
+    }
+
+    fn provide_formatting(&mut self, _ctx: &mut Context, _provider: &str, doc: &Document, _options: FormattingOptions, _range: Option<Range>) -> Vec<TextEdit> {
+        format_lines(doc.text.as_deref().unwrap_or(""), &self.tags)
+    }
+
     /// `see src/main.rs:42` in a TODO's text: Go to Definition opens it.
     fn provide_definition(&mut self, ctx: &mut Context, _provider: &str, doc: &Document, pos: Position) -> Vec<Location> {
         let Some(line) = doc.text.as_deref().and_then(|t| t.lines().nth(pos.line as usize)) else { return Vec::new() };
@@ -366,5 +417,13 @@ mod tests {
         let found = find_todos(Path::new("/w/a.rs"), text, &tags);
         let short: Vec<(u32, u32, &str, &str)> = found.iter().map(|t| (t.line, t.col, t.tag.as_str(), t.text.as_str())).collect();
         assert_eq!(short, [(0, 13, "TODO", "write b"), (1, 3, "FIXME", "it breaks"), (3, 2, "TODO", "")]);
+    }
+
+    #[test]
+    fn formats_todo_files() {
+        let tags = vec!["TODO".to_string(), "FIXME".to_string()];
+        let edits = format_lines("todo: a  \nFIXME: b\nnottodo: c\n", &tags);
+        let short: Vec<(u32, &str)> = edits.iter().map(|e| (e.range.start.line, e.new_text.as_str())).collect();
+        assert_eq!(short, [(0, "TODO: a")]);
     }
 }

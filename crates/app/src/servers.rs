@@ -1090,6 +1090,11 @@ impl Servers {
                                 continue;
                             }
                             (Err(_), Pending::ResolveLens { .. }) => continue,
+                            // Quick Fix counts the answers.
+                            (Err(_), Pending::CodeActions { auto }) => {
+                                events.push(Event::CodeActions { actions: Vec::new(), encoding, key: key.clone(), auto: *auto });
+                                continue;
+                            }
                             (Err(e), Pending::PrepareTypes) => {
                                 events.push(Event::Failed { message: e });
                                 continue;
