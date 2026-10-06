@@ -30,6 +30,7 @@ mod debug;
 mod debug_view;
 mod file_ops;
 mod find_widget;
+mod ime_view;
 mod folding_ranges;
 mod git_actions;
 mod inlays;
@@ -535,6 +536,9 @@ pub struct Workbench {
     palette_files: Option<Vec<(PathBuf, String)>>,
     hits: Vec<(Rect, Hit)>,
     hover_hit: Option<Hit>,
+    /// Text being composed with an input method, and where the last frame showed it.
+    preedit: crate::ime::Preedit,
+    ime_area: Option<Rect>,
     mouse: (f32, f32),
     drag: Option<Drag>,
     last_click: Option<(Instant, f32, f32, u32)>,
@@ -696,6 +700,8 @@ impl Workbench {
             palette_files: None,
             hits: Vec::new(),
             hover_hit: None,
+            preedit: Default::default(),
+            ime_area: None,
             mouse: (0.0, 0.0),
             drag: None,
             last_click: None,
@@ -2738,6 +2744,7 @@ impl Workbench {
     }
 
     pub fn draw(&mut self, c: &mut Canvas) {
+        crate::ime::begin_frame();
         c.set_ui_mono(self.ui_mono);
         let missing = c.set_mono_font(&self.font_family);
         if !missing.is_empty() {
@@ -2853,6 +2860,7 @@ impl Workbench {
         if self.palette.is_some() {
             self.draw_palette(c, full);
         }
+        self.draw_preedit(c);
 
         let title = self.window_title();
         if title != self.title {
@@ -4034,6 +4042,8 @@ impl Workbench {
         if self.caret_on() {
             c.fill(Rect::new(text_rect.x + tw + 1.0, input.y + (input.h - 22.0) / 2.0, 1.5, 22.0), self.color("focusBorder"));
         }
+        let text_y = input.y + ((input.h - big.line_height) / 2.0).round();
+        crate::ime::caret(Rect::new(text_rect.x + tw + 1.0, text_y, 1.0, big.line_height), &big, self.color("quickInput.background"), "", text_rect);
         c.pop_clip();
         let line = if error.is_some() { self.color("inputValidation.errorBorder") } else { self.color("widget.border") };
         c.fill(Rect::new(bx.x + 1.0, input.bottom(), bx.w - 2.0, 1.0), line);

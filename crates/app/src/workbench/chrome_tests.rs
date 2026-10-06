@@ -180,3 +180,52 @@ fn welcome_page() {
     wb.shutdown();
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Input methods: on while something takes text, composed text shown at the caret and not in the
+/// document, the commit typed as one edit, and the candidate list placed at the caret.
+#[test]
+fn input_method_composition() {
+    let dir = std::env::temp_dir().join(format!("orbvane-ime-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[dir.join("notes.txt")], std::sync::Arc::new(|| {}));
+    let Ok(mut r) = render::Renderer::offscreen((1100, 700), 1.0) else { return }; // no GPU here
+    wb.focus = Focus::Editor;
+    draw(&mut wb, &mut r);
+    let caret = wb.ime_area().expect("the editor takes text");
+    let text = |wb: &Workbench| wb.active_doc().unwrap().buffer.text();
+
+    // Composing: shown at the caret (the area grows over it), the document unchanged.
+    wb.ime_preedit("にほん".into(), Some((0, 9)));
+    draw(&mut wb, &mut r);
+    let composing = wb.ime_area().unwrap();
+    assert_eq!((composing.x, composing.y), (caret.x, caret.y));
+    assert!(composing.w > 20.0, "{composing:?}");
+    assert_eq!(text(&wb), "hello\n");
+
+    // Committed: typed once, undone in one step.
+    wb.ime_commit("日本".into());
+    draw(&mut wb, &mut r);
+    assert_eq!(text(&wb), "日本hello\n");
+    assert_eq!(wb.ime_area().unwrap().w, 1.0);
+    wb.run(Command::Undo);
+    assert_eq!(text(&wb), "hello\n");
+
+    // The palette's input takes over while it's open.
+    wb.run(Command::CommandPalette);
+    draw(&mut wb, &mut r);
+    let palette = wb.ime_area().unwrap();
+    assert!(palette.y < caret.y + 200.0 && (palette.x, palette.y) != (caret.x, caret.y), "{palette:?}");
+    wb.ime_commit("設定".into());
+    assert_eq!(wb.palette.as_ref().unwrap().input, ">設定");
+    wb.palette = None;
+
+    // Nothing that takes text: input methods are off.
+    wb.focus = Focus::Explorer;
+    draw(&mut wb, &mut r);
+    assert!(wb.ime_area().is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}

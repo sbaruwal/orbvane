@@ -214,6 +214,10 @@ impl TextField {
         if focused && caret_on {
             c.fill(Rect::new((self.origin_x + caret_x).round(), r.y + 4.0, 1.0, r.h - 8.0), style.color);
         }
+        if focused {
+            let at = self.text.char_indices().nth(self.caret).map_or(self.text.len(), |(b, _)| b);
+            crate::ime::caret(Rect::new((self.origin_x + caret_x).round(), y, 1.0, style.line_height), style, Color::TRANSPARENT, &self.text[at..], r);
+        }
         c.pop_clip();
     }
 }

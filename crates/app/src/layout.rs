@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use text::{Buffer, Pos};
 
-use crate::editor::{col_to_display, display_to_col, tab_size};
+use crate::editor::{cells, col_to_display, display_to_col, tab_size};
 
 /// A screen row: chars `start..end` of buffer line `line`, drawn `indent` columns in
 /// (continuation rows of a wrapped line line up with its indentation). A `zone` row is the
@@ -58,7 +58,7 @@ impl InlayHint {
         if self.swatch.is_some() {
             return 2;
         }
-        self.label.chars().count() + self.pad_left as usize + self.pad_right as usize
+        crate::editor::display_width(&self.label) + self.pad_left as usize + self.pad_right as usize
     }
 
     pub fn swatch(col: usize, end: usize, color: theme::Color) -> Self {
@@ -119,7 +119,7 @@ fn prefix_display(chars: &[char]) -> Vec<usize> {
     let mut d = 0;
     out.push(0);
     for &c in chars {
-        d += if c == '\t' { tab_size() - d % tab_size() } else { 1 };
+        d += cells(c, d);
         out.push(d);
     }
     out

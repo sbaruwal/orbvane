@@ -10,3 +10,4 @@ cosmic-text.workspace = true
 bytemuck.workspace = true
 theme.workspace = true
 zeno.workspace = true
+unicode-width = "0.2"

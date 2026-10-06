@@ -375,13 +375,18 @@ enum After {
     Select(usize, usize),
 }
 
+/// The columns char `c` takes when it starts at display column `col`: a tab reaches the next
+/// tab stop, a wide (East Asian) char takes 2, a combining mark 0.
+pub(crate) fn cells(c: char, col: usize) -> usize {
+    if c == '\t' { tab_size() - col % tab_size() } else { render::char_cells(c) }
+}
+
 /// Width in columns of `s` with tabs expanded to tab stops.
 pub(crate) fn display_width(s: &str) -> usize {
-    if !s.contains('\t') {
-        return s.chars().count();
+    if s.is_ascii() && !s.contains('\t') {
+        return s.len();
     }
-    let tab = tab_size();
-    s.chars().fold(0, |col, c| if c == '\t' { col + tab - col % tab } else { col + 1 })
+    s.chars().fold(0, |col, c| col + cells(c, col))
 }
 
 /// Recolors bytes `a..z` in sorted, non-overlapping color spans (splitting the one it's in).
@@ -420,7 +425,7 @@ pub(crate) fn expand_tabs_spans(s: &str, spans: &[Span]) -> (String, Vec<Span>) 
             col += n;
         } else {
             out.push(c);
-            col += 1;
+            col += cells(c, col);
         }
     }
     map.push(out.len());
@@ -429,13 +434,13 @@ pub(crate) fn expand_tabs_spans(s: &str, spans: &[Span]) -> (String, Vec<Span>) 
 }
 
 pub(crate) fn col_to_display(line: &str, col: usize) -> usize {
-    line.chars().take(col).fold(0, |d, c| if c == '\t' { d + tab_size() - d % tab_size() } else { d + 1 })
+    line.chars().take(col).fold(0, |d, c| d + cells(c, d))
 }
 
 pub(crate) fn display_to_col(line: &str, target: f32) -> usize {
     let mut d = 0usize;
     for (i, c) in line.chars().enumerate() {
-        let w = if c == '\t' { tab_size() - d % tab_size() } else { 1 };
+        let w = cells(c, d);
         if target < d as f32 + w as f32 / 2.0 {
             return i;
         }
@@ -1885,7 +1890,7 @@ impl EditorState {
                 let mut display = base;
                 for col in vr.start..vr.end {
                     let ch = chars[col];
-                    let width = if ch == '\t' { tab_size() - display % tab_size() } else { 1 };
+                    let width = cells(ch, display);
                     if ch == ' ' || ch == '\t' {
                         let lone_space = ch == ' '
                             && col > 0
@@ -1999,10 +2004,8 @@ impl EditorState {
             let x = (text_x + layout.row_x(&vr, text, head.col, false) as f32 * cw).round();
             let y = y_row(row);
             let under = text.chars().nth(head.col);
-            let w = match under {
-                Some('\t') => (tab_size() - col_to_display(text, head.col) % tab_size()) as f32 * cw,
-                _ => cw,
-            };
+            // A block covers the char under it: a tab to its stop, a wide char two cells.
+            let w = under.map_or(1, |ch| cells(ch, col_to_display(text, head.col))).max(1) as f32 * cw;
             let color = theme.color("editorCursor.foreground");
             match cfg.cursor_style {
                 config::CursorStyle::Line => c.fill(Rect::new(x, y, cfg.cursor_width, lh), color),
@@ -2019,6 +2022,22 @@ impl EditorState {
                 config::CursorStyle::Underline => c.fill(Rect::new(x, y + lh - 2.0, w, 2.0), color),
                 config::CursorStyle::UnderlineThin => c.fill(Rect::new(x, y + lh - 1.0, w, 1.0), color),
             }
+        }
+        // Text being composed with an input method shows at the primary caret.
+        if focused {
+            let head = self.sel.head;
+            let row = layout.row_of(head);
+            let (at, after) = if row >= first_row && row < last_row && head.line >= first && head.line < last {
+                let vr = &rows[row - first_row];
+                let text = text_of(head.line);
+                let x = text_x + layout.row_x(vr, text, head.col, false) as f32 * cw;
+                let rest: String = text.chars().take(vr.end).skip(head.col).collect();
+                let (rest, _) = expand_tabs_spans(&rest, &[]);
+                (Rect::new(x.round(), y_row(row), 1.0, lh), rest)
+            } else {
+                (Rect::new(text_rect.x, text_rect.y, 1.0, lh), String::new())
+            };
+            crate::ime::caret(at, &style, theme.color("editor.background"), &after, text_rect);
         }
         c.pop_clip();
 
@@ -2307,7 +2326,7 @@ fn draw_inlay_hint(c: &mut Canvas, theme: &Theme, h: &crate::layout::InlayHint, 
     let fg = theme.color_opt(fg_key).filter(|c| c.a > 0.0).unwrap_or_else(|| theme.color("editorInlayHint.foreground"));
     let bg = theme.color_opt(bg_key).filter(|c| c.a > 0.0).unwrap_or_else(|| theme.color("editorInlayHint.background"));
     let x0 = x + if h.pad_left { cw } else { 0.0 };
-    let w = h.label.chars().count() as f32 * cw;
+    let w = display_width(&h.label) as f32 * cw;
     let r = Rect::new(x0, y + 1.0, w, lh - 2.0);
     c.fill_rounded(r, bg, 3.0);
     let st = TextStyle::mono(font_size() * 0.9, lh, fg);
@@ -2332,6 +2351,23 @@ fn indent_level(b: &Buffer, line: usize, text: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wide chars take two columns, combining marks none, tabs reach the next stop.
+    #[test]
+    fn columns_count_wide_chars() {
+        assert_eq!(display_width("日本"), 4);
+        assert_eq!(display_width("a日b"), 4);
+        assert_eq!(display_width("e\u{301}"), 1);
+        assert_eq!(col_to_display("a日b", 2), 3);
+        assert_eq!(col_to_display("한국어 x", 4), 7);
+        assert_eq!(cells('\t', 1), tab_size() - 1);
+        assert_eq!(cells('日', 0), 2);
+        // A click lands on the nearer side of a wide char.
+        assert_eq!(display_to_col("a日b", 1.9), 1);
+        assert_eq!(display_to_col("a日b", 2.1), 2);
+        assert_eq!(display_to_col("a日b", 3.4), 2);
+        assert_eq!(display_to_col("a日b", 3.6), 3);
+    }
 
     #[test]
     fn finds_links() {

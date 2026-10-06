@@ -17,6 +17,7 @@ mod emmet;
 mod explorer;
 mod folding;
 mod icons;
+mod ime;
 mod imageio;
 mod input;
 mod json_schemas;
@@ -47,8 +48,8 @@ use std::time::Instant;
 
 use muda::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu};
 use winit::application::ApplicationHandler;
-use winit::dpi::LogicalSize;
-use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::dpi::{LogicalPosition, LogicalSize};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key as WKey, ModifiersState, NamedKey};
 use winit::platform::macos::WindowAttributesExtMacOS;
@@ -74,6 +75,8 @@ struct Win {
     window: Arc<Window>,
     renderer: render::Renderer,
     workbench: Workbench,
+    /// What the window was last told about input methods: allowed, and the caret's area.
+    ime: Option<(f32, f32, f32, f32)>,
 }
 
 /// The app's state. It lives outside winit's handler (see `Shared`) so that input can be
@@ -614,7 +617,7 @@ impl Core {
             workbench.set_update_checks(false);
         }
         self.front = Some(window.id());
-        self.wins.push(Win { window: window.clone(), renderer, workbench });
+        self.wins.push(Win { window: window.clone(), renderer, workbench, ime: None });
         self.apply_effects();
         window.focus_window();
         window.request_redraw();
@@ -899,6 +902,9 @@ impl Core {
                     w.workbench.key(input);
                 }
             }
+            WindowEvent::Ime(Ime::Preedit(text, selected)) => w.workbench.ime_preedit(text, selected),
+            WindowEvent::Ime(Ime::Commit(text)) => w.workbench.ime_commit(text),
+            WindowEvent::Ime(Ime::Disabled) => w.workbench.ime_preedit(String::new(), None),
             WindowEvent::DroppedFile(path) => w.workbench.drop_path(&path),
             WindowEvent::Focused(true) => {
                 w.workbench.window_focused();
@@ -977,6 +983,16 @@ impl ApplicationHandler<UserEvent> for App {
                 if w.renderer.frame(bg, |c| wb.draw(c)) {
                     w.window.request_redraw();
                 }
+                // Input methods are on while something takes text, with their candidate list
+                // at its caret.
+                let area = w.workbench.ime_area().map(|r| (r.x, r.y, r.w, r.h));
+                if area.is_some() != w.ime.is_some() {
+                    w.window.set_ime_allowed(area.is_some());
+                }
+                if let Some((x, y, wd, h)) = area.filter(|a| Some(*a) != w.ime) {
+                    w.window.set_ime_cursor_area(LogicalPosition::new(x as f64, y as f64), LogicalSize::new(wd as f64, h as f64));
+                }
+                w.ime = area;
                 core.apply_effects();
                 core.flush_redraws();
             }
@@ -1009,6 +1025,7 @@ impl ApplicationHandler<UserEvent> for App {
             | WindowEvent::CursorMoved { .. }
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::KeyboardInput { is_synthetic: false, .. }
+            | WindowEvent::Ime(_)
             | WindowEvent::DroppedFile(_)
             | WindowEvent::Focused(_) => self.push(Input::Window(id, event)),
             _ => {}

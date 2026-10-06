@@ -614,6 +614,10 @@ impl Workbench {
         if inst.scroll == 0 && t.cursor_visible && !exited && cy < rows {
             let x = origin.0 + cx as f32 * cw;
             let y = origin.1 + cy as f32 * line_h();
+            if focused {
+                let line = Rect::new(origin.0, y, cols as f32 * cw, line_h());
+                crate::ime::caret(Rect::new(x, y, 1.0, line_h()), &style, colors.bg, "", line);
+            }
             match (focused, t.cursor_shape) {
                 (false, _) => c.bordered(Rect::new(x, y, cw, line_h()), Color::TRANSPARENT, colors.cursor, 1.0, 0.0),
                 (true, CursorShape::Block) => {

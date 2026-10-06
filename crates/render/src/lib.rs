@@ -10,7 +10,7 @@ mod text;
 use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
-pub use text::{Font, Icon, TextStyle, ICON_TURNS};
+pub use text::{char_cells, Font, Icon, TextStyle, ICON_TURNS};
 use text::TextSystem;
 pub use theme::Color;
 

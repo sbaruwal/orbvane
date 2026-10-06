@@ -88,6 +88,9 @@ Click a section to expand it.
 
 - **Multiple cursors:** ⌥-click, ⌥⌘↑/↓, ⌘D, ⇧⌘L, and column selection with ⇧⌥-drag. Undo puts
   every cursor back.
+- **Input methods** for Chinese, Japanese, Korean and other composed text work in the editor, the
+  terminal and every text field: the text being composed shows at the caret, with the candidate
+  list next to it. Wide characters (CJK, emoji) take two columns.
 - **Folding** from the language server or by indentation; **word wrap** (⌥Z); **sticky scroll**,
   which keeps the lines that open the surrounding blocks pinned at the top; **minimap**;
   **breadcrumbs** with the symbols at the cursor.
@@ -495,6 +498,8 @@ Every setting is listed with its description in the Settings sheet.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
 - **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
+- **Accessibility:** VoiceOver can't read the interface yet
+  ([#2](https://github.com/sbaruwal/orbvane/issues/2)).
 - **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
   Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).
 
@@ -530,7 +535,7 @@ Needs a recent stable Rust on macOS 14 or later. To contribute, see [CONTRIBUTIN
 The UI toolkit is our own: layout, widgets, the GPU renderer, the glyph atlas, icons and theming.
 Crates are used only for the low-level pieces: `winit` (window and events), `wgpu` (Metal),
 `cosmic-text` (font shaping), `ropey` (text rope), `tree-sitter` and grammars (parsing), `vte`
-(terminal escape sequences), `regex` (search), `muda` (native menu bar), `rfd` (native dialogs),
+(terminal escape sequences), `unicode-width` (which characters are wide), `regex` (search), `muda` (native menu bar), `rfd` (native dialogs),
 `arboard` (clipboard), and `objc2`/`dispatch2` (a few direct AppKit calls).
 
 | Crate | Purpose |

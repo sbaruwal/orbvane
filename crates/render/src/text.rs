@@ -62,6 +62,43 @@ impl TextStyle {
     }
 }
 
+/// How many cells of a monospace grid `c` takes: 2 for wide (East Asian) characters, 0 for
+/// combining marks, else 1. The editor's columns use the same rule.
+pub fn char_cells(c: char) -> usize {
+    use unicode_width::UnicodeWidthChar;
+    c.width().unwrap_or(1)
+}
+
+/// Puts monospace glyphs on the grid of `cell`-wide cells: a glyph from a fallback font (CJK,
+/// emoji) has its own advance, so it's centered in the cells its text takes instead, and the
+/// text after it stays in its columns. Right-to-left runs are left as shaped.
+fn snap_to_cells(text: &str, line: &mut ShapedLine, cell: f32) {
+    if cell <= 0.0 || line.glyphs.iter().any(|g| g.level.is_rtl()) {
+        return;
+    }
+    let mut x = 0.0;
+    // The last cluster placed: (start byte, its shaped x, its new x).
+    let mut last: Option<(usize, f32, f32)> = None;
+    for g in &mut line.glyphs {
+        let cells: usize = text.get(g.start..g.end).map_or(1, |t| t.chars().map(char_cells).sum());
+        match last {
+            // More glyphs of the same cluster, or a zero-width one: kept where they were
+            // relative to the glyph before.
+            Some((start, shaped, placed)) if start == g.start || cells == 0 => {
+                g.x = placed + (g.x - shaped);
+            }
+            _ => {
+                let slot = cells as f32 * cell;
+                let shaped = g.x;
+                g.x = x + ((slot - g.w) / 2.0).max(0.0);
+                last = Some((g.start, shaped, g.x));
+                x += slot;
+            }
+        }
+    }
+    line.width = x;
+}
+
 pub(crate) struct ShapedLine {
     pub glyphs: Vec<LayoutGlyph>,
     pub width: f32,
@@ -260,6 +297,10 @@ impl TextSystem {
             line.width = run.line_w;
             line.baseline = run.line_y;
         }
+        if matches!(style.font, Font::Mono) && !text.is_ascii() {
+            let cell = self.shape_uncached("0000000000", &[], style).width / 10.0;
+            snap_to_cells(text, &mut line, cell);
+        }
         line
     }
 
@@ -324,6 +365,26 @@ impl TextSystem {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Wide chars from fallback fonts sit centered in two cells of the monospace grid, and the
+    /// text after them stays in its columns.
+    #[test]
+    fn wide_chars_take_two_cells() {
+        let Ok(mut r) = crate::Renderer::offscreen((8, 8), 1.0) else { return }; // no GPU here
+        let t = &mut r.text;
+        let style = TextStyle::mono(13.0, 18.0, Color::rgba8(255, 255, 255, 255));
+        let cell = t.shape("0000000000", &[], &style).width / 10.0;
+        let line = t.shape("a日b", &[], &style);
+        let xs: Vec<(usize, f32, f32)> = line.glyphs.iter().map(|g| (g.start, g.x, g.w)).collect();
+        assert!((line.width - 4.0 * cell).abs() < 0.01, "{} vs {cell}", line.width);
+        let wide = xs.iter().find(|g| g.0 == 1).unwrap();
+        assert!(wide.1 >= cell - 0.01 && wide.1 + wide.2 <= 3.0 * cell + 0.01, "{xs:?}");
+        let b = xs.iter().find(|g| g.0 == 4).unwrap();
+        assert!((b.1 - 3.0 * cell).abs() < 0.01, "{xs:?}");
+        assert_eq!(char_cells('a'), 1);
+        assert_eq!(char_cells('日'), 2);
+        assert_eq!(char_cells('\u{301}'), 0); // a combining accent
+    }
 
     /// "SF Mono" finds the copy macOS ships (a hidden system font) when it isn't installed under
     /// its own name; a missing first choice is reported, missing fallbacks aren't.

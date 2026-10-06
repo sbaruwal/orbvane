@@ -180,7 +180,7 @@ impl Workbench {
             blocks.extend(parse_markdown(&sig.documentation));
         }
         let rows = layout_blocks(c, &blocks, &text_style, inner_w);
-        let label_w = lines.iter().map(|(a, b)| sig.label[*a..*b].chars().count() as f32 * cw).fold(0.0f32, f32::max) + lead;
+        let label_w = lines.iter().map(|(a, b)| crate::editor::display_width(&sig.label[*a..*b]) as f32 * cw).fold(0.0f32, f32::max) + lead;
         let docs_w = rows.iter().map(|r| row_width(c, r, &text_style, &code_style)).fold(0.0f32, f32::max);
         let docs_h: f32 = rows.iter().map(|r| row_height(r, &text_style)).sum();
         let label_h = lines.len() as f32 * line_height();
@@ -222,7 +222,7 @@ impl Workbench {
                 let part = &sig.label[win[0]..win[1]];
                 c.text(x, y, part, st);
                 if j == 1 {
-                    c.fill(Rect::new(x, y + line_height() - 2.0, part.chars().count() as f32 * cw, 1.0), highlight);
+                    c.fill(Rect::new(x, y + line_height() - 2.0, crate::editor::display_width(part) as f32 * cw, 1.0), highlight);
                 }
                 x += part.chars().count() as f32 * cw;
             }
