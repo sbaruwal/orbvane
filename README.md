@@ -28,6 +28,17 @@ drawn by its own GPU toolkit.</p>
   </picture>
 </p>
 
+<table>
+  <tr>
+    <td width="50%"><img alt="Source Control with two changed files and the graph" src="assets/screenshots/scm.png"><br><sub>Source Control</sub></td>
+    <td width="50%"><img alt="The command palette over the editor" src="assets/screenshots/palette.png"><br><sub>The palette</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img alt="The Settings sheet with its contents and common settings" src="assets/screenshots/settings.png"><br><sub>Settings</sub></td>
+    <td width="50%"><img alt="A terminal in the panel under the editor" src="assets/screenshots/terminal.png"><br><sub>Terminal</sub></td>
+  </tr>
+</table>
+
 ## Why Orbvane
 
 - **Native, all the way down.** No browser engine and no web view: a Metal renderer, native menus
@@ -356,6 +367,29 @@ file. Search, Go to File, language servers, tests and source control cover every
 
 </details>
 
+<details>
+<summary><b>Accessibility</b>: VoiceOver and input methods</summary>
+
+<br>
+
+- **VoiceOver** (⌘F5) reads the window through macOS's own accessibility interfaces:
+  - **The editor:** its text by character, word and line, the caret and the selection, and it
+    follows as you move or type. Moving VoiceOver's cursor moves the caret.
+  - **Lists you move through:** the Explorer and the palette (Go to File, commands, every picker)
+    read each row as you arrow through ("src, folder, expanded", "main.rs, modified").
+  - **Lists you browse:** Problems, Source Control's changes, Search's results, Run and Debug's
+    sections and the Assistant's conversation.
+  - **Controls:** buttons, tabs (the shown one selected), toggles with their state and text
+    fields, in the toolbar, the views, the panel, the status bar and the find widget. Each can be
+    pressed from VoiceOver.
+  - **Settings:** each setting with its value, and its description as help.
+  - **Said as it happens:** the selected suggestion while you type, and an agent's reply or
+    question in the Assistant.
+- **Input methods:** Chinese, Japanese and Korean input with the candidate window at the caret,
+  in the editor, the palette, text fields and the terminal; wide characters take two columns.
+
+</details>
+
 ## Keyboard shortcuts
 
 These are the defaults. Change any of them with ⌘K ⌘S, or in `keybindings.json`
@@ -500,13 +534,7 @@ Every setting is listed with its description in the Settings sheet.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
 - **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
-- **Accessibility:** VoiceOver reads and follows the editor's text, the Explorer and the palette as
-  you move through them, the Problems, Source Control and Search lists, and says the selected
-  suggestion while you type. Buttons, tabs, toggles and text fields are named and can be pressed
-  or read, and so are the Settings sheet's settings (with their descriptions), Run and Debug's
-  sections and the Assistant's conversation; an agent's reply and its questions are read out as
-  they arrive. The terminal's output and the Debug Console aren't read yet, and reports from
-  VoiceOver users are welcome ([#2](https://github.com/sbaruwal/orbvane/issues/2)).
+- **Accessibility:** VoiceOver doesn't read the terminal's output or the Debug Console yet.
 - **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
   Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).
 
