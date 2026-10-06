@@ -229,3 +229,46 @@ fn input_method_composition() {
     assert!(wb.ime_area().is_none());
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// What assistive technology sees: the window's areas, the editor's text area with focus, and
+/// its text answered in UTF-16 offsets and buffer lines.
+#[test]
+fn accessibility_tree_and_text() {
+    let dir = std::env::temp_dir().join(format!("orbvane-a11y-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.rs"), "fn main() {\n    println!(\"héllo 日本\");\n}\n").unwrap();
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[dir.join("main.rs")], std::sync::Arc::new(|| {}));
+    let Ok(mut r) = render::Renderer::offscreen((1100, 700), 1.0) else { return }; // no GPU here
+    wb.focus = Focus::Editor;
+    draw(&mut wb, &mut r);
+
+    let areas: Vec<String> = wb.a11y_children(None).into_iter().map(|id| wb.a11y_node(id).unwrap().label.clone()).collect();
+    assert!(areas.contains(&"Editor".to_string()) && areas.contains(&"Status Bar".to_string()), "{areas:?}");
+    let text = a11y::TEXT_AREA;
+    assert_eq!(wb.a11y_children(Some(a11y::EDITORS)), vec![text]);
+    let node = wb.a11y_node(text).unwrap();
+    assert_eq!((node.role, node.label.as_str()), (A11yRole::TextArea, "main.rs"));
+    assert_eq!(wb.a11y_focused(), Some(text));
+
+    // "日本" is 2 UTF-16 units; the text is 40 in all.
+    assert_eq!(wb.a11y_length(text), 40);
+    assert_eq!(wb.a11y_line_range(text, 1), (12, 26));
+    assert_eq!(wb.a11y_line_of(text, 20), 1);
+    assert_eq!(wb.a11y_string(text, 32, 2), "日本");
+    assert!(wb.a11y_range_frame(text, 0, 2).w > 0.0);
+
+    // Moving the caret from outside, as VoiceOver does.
+    wb.a11y_select(text, 32, 2);
+    assert_eq!(wb.a11y_selection(text), (32, 2));
+    let before = wb.a11y_state();
+    wb.a11y_select(text, 0, 0);
+    assert_ne!(wb.a11y_state(), before);
+
+    // Nothing that reads text has the keyboard.
+    wb.focus = Focus::Explorer;
+    assert_eq!(wb.a11y_focused(), None);
+    let _ = std::fs::remove_dir_all(&dir);
+}

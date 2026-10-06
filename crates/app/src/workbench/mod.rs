@@ -29,6 +29,7 @@ mod color_decorators;
 mod debug;
 mod debug_view;
 mod file_ops;
+mod a11y;
 mod find_widget;
 mod ime_view;
 mod folding_ranges;
@@ -87,6 +88,7 @@ mod workspaces;
 pub(crate) use assistant::AgentAction;
 pub use debug::DebugPick;
 pub use git_actions::{GitInput, GitPick};
+pub use a11y::{Role as A11yRole, State as A11yState};
 pub use recent::{dock_folders, recent_folders_for_system};
 pub use session::{save_windows, window_bounds, SavedWindow, WindowBounds};
 
@@ -538,6 +540,8 @@ pub struct Workbench {
     hover_hit: Option<Hit>,
     /// Text being composed with an input method, and where the last frame showed it.
     preedit: crate::ime::Preedit,
+    /// What this frame shows to assistive technology (`a11y.rs`).
+    a11y: Vec<a11y::Node>,
     ime_area: Option<Rect>,
     mouse: (f32, f32),
     drag: Option<Drag>,
@@ -701,6 +705,7 @@ impl Workbench {
             hits: Vec::new(),
             hover_hit: None,
             preedit: Default::default(),
+            a11y: Vec::new(),
             ime_area: None,
             mouse: (0.0, 0.0),
             drag: None,
@@ -2745,6 +2750,7 @@ impl Workbench {
 
     pub fn draw(&mut self, c: &mut Canvas) {
         crate::ime::begin_frame();
+        self.a11y.clear();
         c.set_ui_mono(self.ui_mono);
         let missing = c.set_mono_font(&self.font_family);
         if !missing.is_empty() {
@@ -2818,26 +2824,32 @@ impl Workbench {
 
         if !zen {
             self.draw_title_bar(c, title);
+            self.a11y_area(a11y::TOOLBAR, "Toolbar", title);
         }
         if self.sidebar_visible {
             self.draw_sidebar(c, sidebar);
+            self.a11y_area(a11y::SIDEBAR, "Primary Side Bar", sidebar);
             self.hits.push((Rect::new(sidebar.right() - 2.0, sidebar.y, 4.0, sidebar.h), Hit::SidebarSash));
         }
         if aux.w > 0.0 {
             self.draw_aux_bar(c, aux);
+            self.a11y_area(a11y::SECONDARY_SIDEBAR, "Secondary Side Bar", aux);
             self.hits.push((Rect::new(aux.x - 2.0, aux.y, 4.0, aux.h), Hit::AuxSash));
         }
         if editors.h > 0.0 {
+            self.a11y_area(a11y::EDITORS, "Editor", editors);
             self.draw_editor_groups(c, editors);
         }
         if self.panel_visible {
             self.draw_panel(c, panel);
+            self.a11y_area(a11y::PANEL, "Panel", panel);
             if !self.panel_maximized {
                 self.hits.push((Rect::new(panel.x, panel.y - 2.0, panel.w, 4.0), Hit::PanelSash));
             }
         }
         if !zen {
             self.draw_status_bar(c, status);
+            self.a11y_area(a11y::STATUS_BAR, "Status Bar", status);
         }
 
         // Sash highlight while hovering or dragging.
@@ -3494,6 +3506,7 @@ impl Workbench {
         let sticky: Vec<(Rect, usize)> = ed.sticky.clone();
         let lenses: Vec<(Rect, usize)> = ed.lens_hits.clone();
         let swatches: Vec<(Rect, text::Pos)> = ed.swatch_hits.clone();
+        self.a11y_text_area(g, geom.text);
         self.hits.push((editor_rect, Hit::Editor(g)));
         self.hits.extend(actions.into_iter().enumerate().map(|(i, r)| (r, Hit::ConflictAction(g, i))));
         self.hits.push((geom.glyph, Hit::GlyphMargin(g)));

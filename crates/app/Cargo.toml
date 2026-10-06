@@ -36,3 +36,4 @@ rfd.workspace = true
 arboard.workspace = true
 dispatch2 = "0.3"
 objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSObject", "NSRange", "NSString"] }

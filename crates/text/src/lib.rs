@@ -514,6 +514,28 @@ impl Buffer {
         self.to_pos(idx)
     }
 
+    /// The text's length in UTF-16 code units (how macOS counts text).
+    pub fn len_utf16(&self) -> usize {
+        self.rope.len_utf16_cu()
+    }
+
+    /// The UTF-16 offset of a position.
+    pub fn utf16_of(&self, pos: Pos) -> usize {
+        self.rope.char_to_utf16_cu(self.to_char(pos))
+    }
+
+    /// The position at a UTF-16 offset (clamped; inside a surrogate pair rounds down).
+    pub fn pos_of_utf16(&self, offset: usize) -> Pos {
+        let offset = offset.min(self.rope.len_utf16_cu());
+        self.to_pos(self.rope.utf16_cu_to_char(offset))
+    }
+
+    /// The text between two UTF-16 offsets.
+    pub fn text_utf16(&self, start: usize, end: usize) -> String {
+        let (a, z) = (self.pos_of_utf16(start), self.pos_of_utf16(end.max(start)));
+        self.text_in(&Selection { anchor: a, head: z, goal_col: None })
+    }
+
     /// Undoes the last step, returning the cursors from before it.
     pub fn undo(&mut self, current: &[Selection]) -> Option<Vec<Selection>> {
         let snap = self.undo.pop()?;

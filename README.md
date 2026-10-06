@@ -500,7 +500,8 @@ Every setting is listed with its description in the Settings sheet.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
 - **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
-- **Accessibility:** VoiceOver can't read the interface yet
+- **Accessibility:** VoiceOver reads and follows the editor's text and names the window's areas,
+  but lists, buttons and the other controls aren't exposed yet
   ([#2](https://github.com/sbaruwal/orbvane/issues/2)).
 - **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
   Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).

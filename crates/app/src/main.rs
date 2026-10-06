@@ -3,6 +3,7 @@
 //! This file is the platform layer: the native macOS window and menu bar, and translation of
 //! winit events into workbench input.
 
+mod a11y;
 mod agents;
 mod brackets;
 mod colors;
@@ -80,6 +81,8 @@ struct Win {
     workbench: Workbench,
     /// What the window was last told about input methods: allowed, and the caret's area.
     ime: Option<(f32, f32, f32, f32)>,
+    /// What assistive technology was last told about (`a11y::after_frame`).
+    a11y: workbench::A11yState,
 }
 
 /// The app's state. It lives outside winit's handler (see `Shared`) so that input can be
@@ -699,7 +702,8 @@ impl Core {
             workbench.set_update_checks(false);
         }
         self.front = Some(window.id());
-        self.wins.push(Win { window: window.clone(), renderer, workbench, ime: None });
+        a11y::attach(&window);
+        self.wins.push(Win { window: window.clone(), renderer, workbench, ime: None, a11y: Default::default() });
         self.apply_effects();
         window.focus_window();
         window.request_redraw();
@@ -762,6 +766,7 @@ impl Core {
 
     fn remove(&mut self, i: usize) {
         let win = self.wins.remove(i);
+        a11y::detach(win.window.id());
         let id = win.window.id();
         if self.front == Some(id) {
             self.front = None;
@@ -1102,6 +1107,7 @@ impl ApplicationHandler<UserEvent> for App {
                     w.window.set_ime_cursor_area(LogicalPosition::new(x as f64, y as f64), LogicalSize::new(wd as f64, h as f64));
                 }
                 w.ime = area;
+                a11y::after_frame(w.window.id(), &w.workbench, &mut w.a11y);
                 core.apply_effects();
                 core.flush_redraws();
             }
