@@ -89,7 +89,7 @@ impl Workbench {
             WelcomeHit::Run(cmd) => self.run(cmd),
             WelcomeHit::Recent(i) => {
                 if let Some(path) = self.welcome.recent.get(i).cloned() {
-                    self.open_folder(&path);
+                    self.open_folder_by_user(&path);
                 }
             }
             WelcomeHit::Theme(i) => {

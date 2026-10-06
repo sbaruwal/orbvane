@@ -34,6 +34,16 @@ struct Global {
     /// Outline view options.
     #[serde(default)]
     outline: Option<OutlineOptions>,
+    /// The other windows open at the last quit (`last_folder` and `window` are the first's).
+    #[serde(default)]
+    other_windows: Vec<SavedWindow>,
+}
+
+/// A window to reopen: its folder (None: an empty window) and place.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct SavedWindow {
+    pub folder: Option<PathBuf>,
+    pub bounds: Option<WindowBounds>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -180,12 +190,59 @@ pub fn window_bounds() -> Option<WindowBounds> {
     read::<Global>(&state_dir().join("global.json")).window
 }
 
+fn reopenable(f: &Path) -> bool {
+    f.is_dir() || (crate::workspace::is_workspace_file(f) && f.is_file())
+}
+
+/// The windows to reopen after the first one (which reopens `folder_to_restore`) on a launch
+/// without arguments (`window.restoreWindows`).
+pub fn other_windows_to_restore(store: &settings::Store) -> Vec<SavedWindow> {
+    windows_from(read(&state_dir().join("global.json")), &store.string("window.restoreWindows"))
+}
+
+fn windows_from(global: Global, mode: &str) -> Vec<SavedWindow> {
+    global
+        .other_windows
+        .into_iter()
+        .filter(|w| match &w.folder {
+            Some(f) => mode != "none" && reopenable(f),
+            None => mode == "all",
+        })
+        .collect()
+}
+
+/// Remembers the windows open when quitting, the one in front first: it reopens with the
+/// launch (`folder_to_restore`, `window_bounds`), the others after it.
+pub fn save_windows(windows: &[SavedWindow]) {
+    let path = state_dir().join("global.json");
+    let mut global: Global = read(&path);
+    remember_windows(&mut global, windows);
+    write(&path, &global);
+}
+
+fn remember_windows(global: &mut Global, windows: &[SavedWindow]) {
+    let mut list: Vec<SavedWindow> = Vec::new();
+    for w in windows {
+        if w.folder.is_none() || !list.iter().any(|l| l.folder == w.folder) {
+            list.push(w.clone());
+        }
+    }
+    let mut list = list.into_iter();
+    if let Some(first) = list.next() {
+        global.last_folder = first.folder;
+        if first.bounds.is_some() {
+            global.window = first.bounds;
+        }
+    }
+    global.other_windows = list.collect();
+}
+
 /// The folder to reopen on a launch without arguments (`window.restoreWindows`).
 pub fn folder_to_restore(store: &settings::Store) -> Option<PathBuf> {
     if store.string("window.restoreWindows") == "none" {
         return None;
     }
-    read::<Global>(&state_dir().join("global.json")).last_folder.filter(|f| f.is_dir() || (crate::workspace::is_workspace_file(f) && f.is_file()))
+    read::<Global>(&state_dir().join("global.json")).last_folder.filter(|f| reopenable(f))
 }
 
 fn view_name(v: View) -> String {
@@ -308,15 +365,28 @@ impl Workbench {
         if let Some(f) = folder {
             push_recent(&mut global.recent, f);
         }
-        if let Some(w) = &self.window {
-            let scale = w.scale_factor();
-            let size = w.inner_size().to_logical::<f64>(scale);
-            if let Ok(pos) = w.outer_position() {
-                let pos = pos.to_logical::<f64>(scale);
-                global.window = Some(WindowBounds { x: pos.x, y: pos.y, width: size.width, height: size.height, maximized: w.is_maximized() });
-            }
+        if let Some(b) = self.window_bounds_now() {
+            global.window = Some(b);
         }
         write(&path, &global);
+    }
+
+    /// The other windows of the last session to reopen with this, the first one.
+    pub fn windows_to_restore(&self) -> Vec<SavedWindow> {
+        other_windows_to_restore(&self.settings)
+    }
+
+    /// This window as it is now, to reopen it later.
+    pub fn saved_window(&self) -> SavedWindow {
+        SavedWindow { folder: self.workspace_id(), bounds: self.window_bounds_now() }
+    }
+
+    fn window_bounds_now(&self) -> Option<WindowBounds> {
+        let w = self.window.as_ref()?;
+        let scale = w.scale_factor();
+        let size = w.inner_size().to_logical::<f64>(scale);
+        let pos = w.outer_position().ok()?.to_logical::<f64>(scale);
+        Some(WindowBounds { x: pos.x, y: pos.y, width: size.width, height: size.height, maximized: w.is_maximized() })
     }
 
     /// Reopens the editors and layout saved for the current folder (or for no folder).
@@ -488,6 +558,18 @@ impl Workbench {
         true
     }
 
+    /// Closes this window (one of several): like quitting, for this window only. Returns
+    /// false if the user cancelled.
+    pub fn close_window(&mut self) -> bool {
+        let hot = self.hot_exit();
+        if !hot && self.has_unsaved() && !self.close_all() {
+            return false;
+        }
+        self.save_session(hot);
+        self.shutdown();
+        true
+    }
+
     /// The app is terminating without asking (logout, Dock "Quit"): save what we can.
     pub fn terminating(&mut self) {
         self.save_session(self.hot_exit());
@@ -544,6 +626,74 @@ mod tests {
 
     /// Opening another folder while a file shows used to crash: features keep state per
     /// document index, and the old indexes outlived the documents.
+    #[test]
+    fn windows_are_remembered_in_order() {
+        let dir = std::env::temp_dir().join(format!("orbvane-windows-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        let bounds = WindowBounds { x: 10.0, y: 20.0, width: 800.0, height: 600.0, maximized: false };
+        let win = |f: Option<&PathBuf>| SavedWindow { folder: f.cloned(), bounds: Some(bounds) };
+        let mut global = Global::default();
+        // The one in front first; the same folder twice is one window.
+        remember_windows(&mut global, &[win(Some(&b)), win(None), win(Some(&a)), win(Some(&b)), win(None)]);
+        assert_eq!(global.last_folder.as_ref(), Some(&b));
+        assert_eq!(global.window, Some(bounds));
+        let folders: Vec<Option<PathBuf>> = global.other_windows.iter().map(|w| w.folder.clone()).collect();
+        assert_eq!(folders, vec![None, Some(a.clone()), None]);
+
+        let reopened = |mode: &str| -> Vec<Option<PathBuf>> {
+            let g: Global = serde_json::from_str(&serde_json::to_string(&global).unwrap()).unwrap();
+            windows_from(g, mode).into_iter().map(|w| w.folder).collect()
+        };
+        assert_eq!(reopened("all"), vec![None, Some(a.clone()), None]);
+        assert_eq!(reopened("folders"), vec![Some(a.clone())]);
+        assert!(reopened("none").is_empty());
+        // Folders that are gone stay closed.
+        std::fs::remove_dir_all(&a).unwrap();
+        assert_eq!(reopened("folders"), Vec::<Option<PathBuf>>::new());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn folders_open_in_a_new_window_once_one_is_open() {
+        let dir = std::env::temp_dir().join(format!("orbvane-open-window-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        // SAFETY: every test that reads this wants the same scratch user data folder.
+        unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+        let opened = |wb: &mut Workbench| -> Vec<(PathBuf, bool)> {
+            wb.take_effects()
+                .into_iter()
+                .filter_map(|e| match e {
+                    super::super::Effect::OpenFolder { path, new_window } => Some((path, new_window)),
+                    _ => None,
+                })
+                .collect()
+        };
+        // An empty window takes the folder itself.
+        let mut empty = Workbench::new_window(None, std::sync::Arc::new(|| {}));
+        empty.take_effects();
+        empty.open_folder_by_user(&a);
+        assert_eq!(opened(&mut empty), vec![(a.clone(), false)]);
+        // One with a folder asks for a new window; its own folder does nothing.
+        let mut wb = Workbench::new_window(Some(a.clone()), std::sync::Arc::new(|| {}));
+        wb.take_effects();
+        wb.open_folder_by_user(&b);
+        assert_eq!(opened(&mut wb), vec![(b.clone(), true)]);
+        wb.open_folder_by_user(&a);
+        assert!(opened(&mut wb).is_empty());
+        // "off": replaces it.
+        wb.settings.set(settings::Scope::Workspace, "window.openFoldersInNewWindow", Some(serde_json::json!("off"))).unwrap();
+        wb.open_folder_by_user(&b);
+        assert_eq!(opened(&mut wb), vec![(b.clone(), false)]);
+        wb.shutdown();
+        empty.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn switching_folders_forgets_the_old_documents() {
         let dir = std::env::temp_dir().join(format!("orbvane-switch-{}", std::process::id()));

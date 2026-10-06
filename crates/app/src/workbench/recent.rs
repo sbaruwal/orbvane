@@ -24,6 +24,14 @@ fn recent_label(path: &Path) -> String {
     }
 }
 
+/// How many recent folders the Dock menu lists.
+const DOCK_RECENT: usize = 10;
+
+/// The Dock menu's recent folders, newest first (picked: `Workbench::open_dock_recent`).
+pub fn dock_folders() -> Vec<String> {
+    session::recent_folders().iter().take(DOCK_RECENT).map(|p| recent_label(p)).collect()
+}
+
 impl Workbench {
     /// The folders for File > Open Recent (not the one that's open).
     pub fn recent_menu(&self) -> Vec<(String, PathBuf)> {
@@ -40,7 +48,14 @@ impl Workbench {
     /// A folder picked in File > Open Recent.
     pub fn open_recent(&mut self, index: usize) {
         if let Some((_, path)) = self.recent_menu().into_iter().nth(index) {
-            self.open_folder(&path);
+            self.open_folder_by_user(&path);
+        }
+    }
+
+    /// A folder picked in the Dock menu's recent list (all of them, the open one included).
+    pub fn open_dock_recent(&mut self, index: usize) {
+        if let Some(path) = session::recent_folders().into_iter().nth(index) {
+            self.open_folder_by_user(&path);
         }
     }
 

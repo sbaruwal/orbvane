@@ -59,8 +59,13 @@ Click a section to expand it.
   set up the Assistant. It opens at startup when nothing else does (`workbench.startupEditor`).
 - **Secondary side bar** (⌥⌘B): the Assistant, plus the Outline and Timeline of the active file.
   Drag its edge to resize it.
-- **Status bar:** a row of pills for sync, the language server (with its progress; click for its
-  output), problems, the terminal, cursor position, indentation, encoding and language.
+- **Status bar:** a row of pills for sync, the language server (with its progress; click to
+  restart, stop or start it, or see its output), problems and the terminal (each click shows or
+  hides its panel), cursor position, indentation, encoding and language.
+- **Windows:** one folder per window. New Window (⇧⌘N) opens an empty one; Open Folder and Open
+  Recent open a folder in a new window once the current one has a folder
+  (`window.openFoldersInNewWindow`), and a folder that's already open brings its window forward.
+  Right-click Orbvane in the Dock for New Window and the recent folders.
 - **Themes:** Orbvane Night (the default), Orbvane Day (its light pair) and Orbvane Dark (a deep
   graphite), chosen with ⌘K ⌘T. Standard color theme files work too, from extensions or
   `~/Library/Application Support/Orbvane/themes`.
@@ -93,7 +98,8 @@ Click a section to expand it.
   live preview (⇧⌘V).
 - **Large files** (over 20 MB or 300,000 lines) open instantly. Only the visible lines are
   highlighted, and the heavier features are switched off for them.
-- **Sessions:** Orbvane reopens your folder with its editors, layout, breakpoints and window size.
+- **Sessions:** Orbvane reopens your windows, each with its folder, editors, layout, breakpoints and
+  size (`window.restoreWindows`).
   Quitting never asks about unsaved changes: they're kept, untitled files too (`files.hotExit`).
 
 </details>
@@ -359,6 +365,7 @@ one).
 | ⌘K Z | Zen Mode (Esc Esc leaves) |
 | ⌘K M | Change language mode |
 | ⌃R | Open recent |
+| ⇧⌘N / ⇧⌘W | New window / close window |
 | ⌘K ⌘S | Keyboard shortcuts |
 | ⌘S / ⇧⌘S / ⌥⌘S | Save / save as / save all |
 | ⌘W, ⌥⌘T, ⌘K ⌘W | Close editor / other editors / all editors |
@@ -420,7 +427,7 @@ standard function keys").
 | ⌃\` / ⌃⇧\` | Toggle terminal / new terminal |
 | ⌘\\ / ⌘K (terminal) | Split / clear terminal |
 | ⇧⌘B | Run build task |
-| ⇧⌘U | Output panel |
+| ⇧⌘U / ⇧⌘M | Output / Problems panel |
 
 </details>
 
@@ -458,6 +465,7 @@ and formatting in them are kept when the editor changes them.
 | `editor.inlayHints.enabled`, `editor.codeLens` | Inline hints, code lenses |
 | `editor.stickyScroll.enabled` | Sticky scroll |
 | `files.hotExit` | Keep unsaved changes across quits |
+| `window.openFoldersInNewWindow` | `default` (new window unless this one has no folder), `on` or `off` |
 | `git.autofetch`, `git.confirmSync` | Background fetch, ask before sync |
 | `languageServers.stopWhenIdle` | Stop idle language servers |
 | `assistant.agent`, `assistant.agent.command` | The agent new chats talk to (or a custom command) |

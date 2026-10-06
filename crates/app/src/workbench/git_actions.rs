@@ -773,7 +773,7 @@ impl Workbench {
                 Ok(()) => {
                     let open = self.confirm("Would you like to open the cloned repository?", &job.dest.display().to_string(), "Open");
                     if open {
-                        self.open_folder(&job.dest);
+                        self.open_folder_by_user(&job.dest);
                     }
                 }
                 Err(e) => self.git_error(&format!("Failed to clone '{}':\n{e}", job.url)),

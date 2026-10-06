@@ -603,12 +603,23 @@ fn builtin() -> Vec<Setting> {
                 key: "window.restoreWindows",
                 default: "\"all\"",
                 kind: Kind::Enum(&[
-                    ("all", "Reopen the last window with its folder and editors."),
-                    ("folders", "Reopen the last window only if it had a folder opened."),
+                    ("all", "Reopen all windows with their folders and editors."),
+                    ("folders", "Reopen only the windows that had a folder opened."),
                     ("none", "Never reopen a window. Always start with an empty one."),
                 ]),
                 section: Section::Workbench,
                 description: "Controls how windows are being reopened after starting for the first time. This setting has no effect when the application is already running.",
+            },
+            Setting {
+                key: "window.openFoldersInNewWindow",
+                default: "\"default\"",
+                kind: Kind::Enum(&[
+                    ("default", "Folders open in a new window, unless the current window has no folder yet."),
+                    ("on", "Folders always open in a new window."),
+                    ("off", "Folders replace the one in the current window."),
+                ]),
+                section: Section::Workbench,
+                description: "Controls whether folders open in a new window or replace the folder in the current window (Open Folder, Open Recent, the Welcome page and the Dock menu). A window that already has the folder comes to the front instead.",
             },
             Setting {
                 key: "workbench.tree.indent",

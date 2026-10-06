@@ -129,6 +129,17 @@ impl Workbench {
         self.show_popup(entries, x, y);
     }
 
+    /// View: Toggle Problems (⇧⌘M, the status bar's counts): shows the Problems panel, or
+    /// hides it when it's showing.
+    pub(super) fn toggle_problems(&mut self) {
+        if self.panel_visible && self.panel_tab == 0 {
+            self.panel_visible = false;
+        } else {
+            self.panel_visible = true;
+            self.panel_tab = 0;
+        }
+    }
+
     pub(super) fn problems_toggle(&mut self, t: ProblemsToggle) {
         let f = &mut self.problems_filter;
         match t {

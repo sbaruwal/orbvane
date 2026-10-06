@@ -567,6 +567,13 @@ impl Servers {
         keys.len()
     }
 
+    /// Stops server `key` until it's started again (`restart`).
+    pub fn stop_held(&mut self, key: &ServerKey) {
+        self.log(format!("[{}] stopped", key.0));
+        self.stop(key, true);
+        self.held.insert(key.clone());
+    }
+
     /// The servers that may stop when idle and aren't busy, with when they became idle.
     fn idle_candidates(&self, mode: IdleStop) -> impl Iterator<Item = (&ServerKey, Instant)> {
         self.clients.keys().filter_map(move |key| {

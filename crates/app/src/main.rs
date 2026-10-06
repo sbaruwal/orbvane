@@ -57,24 +57,46 @@ use winit::window::{CursorIcon, Window, WindowId};
 
 use commands::Command;
 use input::{Key, KeyInput};
-use workbench::{CursorKind, Effect, PopupItem, Workbench};
+use workbench::{CursorKind, Effect, PopupItem, SavedWindow, WindowBounds, Workbench};
 
 enum UserEvent {
     Menu(muda::MenuId),
     /// A language server or terminal produced output; redraw to pick it up.
     Wake,
-    /// The workbench agreed to close the window.
+    /// The workbenches agreed to quit.
     Exit,
+    /// Windows wait to be opened (`Core::pending`; only winit's handler can create them).
+    OpenWindows,
+}
+
+/// One window: the native window, its renderer and its workbench.
+struct Win {
+    window: Arc<Window>,
+    renderer: render::Renderer,
+    workbench: Workbench,
 }
 
 /// The app's state. It lives outside winit's handler (see `Shared`) so that input can be
 /// handled from the main dispatch queue.
 struct Core {
-    window: Option<Arc<Window>>,
-    renderer: Option<render::Renderer>,
-    workbench: Workbench,
+    wins: Vec<Win>,
+    /// The first window's workbench, until `resumed` makes its window.
+    first: Option<Workbench>,
+    /// Started without a folder or files: the other windows of the last session reopen too.
+    restore_others: bool,
+    /// Windows to open next (`UserEvent::OpenWindows`).
+    pending: Vec<SavedWindow>,
+    /// The window in front: menu commands go to it.
+    front: Option<WindowId>,
+    /// The window whose popup menu is showing.
+    popup_owner: Option<WindowId>,
+    /// The window that checks for updates.
+    checker: Option<WindowId>,
+    /// Windows to redraw once the queued input is handled.
+    dirty: Vec<WindowId>,
     modifiers: ModifiersState,
     proxy: EventLoopProxy<UserEvent>,
+    waker: lsp::Waker,
     /// Last command run from a keybinding, to drop the duplicate the menu may also send.
     last_key_command: Option<(Command, Instant)>,
     /// The session was saved and the app is ending.
@@ -83,7 +105,7 @@ struct Core {
 
 /// Input waiting to be handled.
 enum Input {
-    Window(WindowEvent),
+    Window(WindowId, WindowEvent),
     Menu(muda::MenuId),
 }
 
@@ -93,7 +115,7 @@ impl Input {
     fn is_user_input(&self) -> bool {
         match self {
             Input::Menu(_) => true,
-            Input::Window(e) => matches!(
+            Input::Window(_, e) => matches!(
                 e,
                 WindowEvent::MouseInput { state: ElementState::Pressed, .. }
                     | WindowEvent::MouseWheel { .. }
@@ -143,7 +165,11 @@ fn drain() {
     }
     if handled {
         core.apply_effects();
-        core.redraw();
+        core.flush_redraws();
+    }
+    // Windows asked for while a dialog held the core.
+    if !core.pending.is_empty() {
+        let _ = core.proxy.send_event(UserEvent::OpenWindows);
     }
 }
 
@@ -247,6 +273,7 @@ fn build_menu() -> Menu {
         true,
         &[
             &menu_item(Command::NewFile),
+            &menu_item(Command::NewWindow),
             &sep(),
             &menu_item(Command::OpenFolder),
             &menu_item(Command::OpenWorkspaceFromFile),
@@ -262,6 +289,7 @@ fn build_menu() -> Menu {
             &menu_item(Command::RevertFile),
             &menu_item(Command::CloseEditor),
             &menu_item(Command::CloseFolder),
+            &menu_item(Command::CloseWindow),
         ],
     )
     .unwrap();
@@ -476,45 +504,267 @@ fn show_popup(window: &Window, items: Vec<PopupItem>, x: f32, y: f32) {
     });
 }
 
+thread_local! {
+    /// The Dock menu last built (kept alive while AppKit shows it).
+    static DOCK_MENU: RefCell<Option<Menu>> = const { RefCell::new(None) };
+}
+
+/// The Dock menu (right-click on the app's icon): New Window and the recent folders (ids
+/// `dock:<index>`). AppKit adds the open windows itself.
+extern "C-unwind" fn dock_menu(_this: *mut objc2::runtime::AnyObject, _sel: objc2::runtime::Sel, _app: *mut objc2::runtime::AnyObject) -> *mut objc2::runtime::AnyObject {
+    let menu = Menu::new();
+    let _ = menu.append(&MenuItem::with_id(Command::NewWindow.id(), Command::NewWindow.menu_label(), true, None));
+    let folders = workbench::dock_folders();
+    if !folders.is_empty() {
+        let _ = menu.append(&PredefinedMenuItem::separator());
+        for (i, label) in folders.iter().enumerate() {
+            let _ = menu.append(&MenuItem::with_id(format!("dock:{i}"), label, true, None));
+        }
+    }
+    let ns = menu.ns_menu() as *mut objc2::runtime::AnyObject;
+    DOCK_MENU.with(|m| *m.borrow_mut() = Some(menu));
+    ns
+}
+
+/// Gives the app delegate (winit's) an `applicationDockMenu:` answering `dock_menu`.
+fn install_dock_menu() {
+    use objc2::runtime::{AnyClass, AnyObject, Imp};
+    type DockMenuFn = extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject) -> *mut AnyObject;
+    // SAFETY: main thread; the method's types ("@@:@": returns an object, takes self, _cmd and
+    // the application) match `dock_menu`.
+    unsafe {
+        let app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let delegate: *mut AnyObject = objc2::msg_send![app, delegate];
+        if delegate.is_null() {
+            return;
+        }
+        let class = (*delegate).class() as *const AnyClass as *mut AnyClass;
+        let imp: Imp = std::mem::transmute::<DockMenuFn, Imp>(dock_menu);
+        objc2::ffi::class_addMethod(class, objc2::sel!(applicationDockMenu:), imp, c"@@:@".as_ptr());
+        // AppKit notes which methods a delegate has when it's set: set it again.
+        let _: () = objc2::msg_send![app, setDelegate: delegate];
+    }
+}
+
+/// A new window's attributes: at `bounds` if that spot is still on a screen, else cascaded
+/// from `near` (the window in front).
+fn window_attributes(event_loop: &ActiveEventLoop, bounds: Option<WindowBounds>, near: Option<&Window>) -> winit::window::WindowAttributes {
+    let mut attrs = Window::default_attributes()
+        .with_title("Orbvane")
+        .with_inner_size(LogicalSize::new(1400.0, 900.0))
+        .with_min_inner_size(LogicalSize::new(640.0, 400.0))
+        .with_titlebar_transparent(true)
+        .with_title_hidden(true)
+        .with_fullsize_content_view(true);
+    if let Some(b) = bounds {
+        let on_screen = event_loop.available_monitors().any(|m| {
+            let (pos, size) = (m.position().to_logical::<f64>(m.scale_factor()), m.size().to_logical::<f64>(m.scale_factor()));
+            b.x + 100.0 > pos.x && b.x < pos.x + size.width - 100.0 && b.y >= pos.y - 50.0 && b.y < pos.y + size.height - 100.0
+        });
+        attrs = attrs.with_inner_size(LogicalSize::new(b.width.max(640.0), b.height.max(400.0))).with_maximized(b.maximized);
+        if on_screen {
+            return attrs.with_position(winit::dpi::LogicalPosition::new(b.x, b.y));
+        }
+    }
+    if let Some(w) = near {
+        let scale = w.scale_factor();
+        if bounds.is_none() {
+            attrs = attrs.with_inner_size(w.inner_size().to_logical::<f64>(scale));
+        }
+        if let Ok(pos) = w.outer_position() {
+            let pos = pos.to_logical::<f64>(scale);
+            attrs = attrs.with_position(winit::dpi::LogicalPosition::new(pos.x + 28.0, pos.y + 28.0));
+        }
+    }
+    attrs
+}
+
 impl Core {
-    fn redraw(&self) {
-        if let Some(w) = &self.window {
-            w.request_redraw();
+    fn index(&self, id: WindowId) -> Option<usize> {
+        self.wins.iter().position(|w| w.window.id() == id)
+    }
+
+    /// The window in front (else the first).
+    fn front_index(&self) -> Option<usize> {
+        self.front.and_then(|id| self.index(id)).or_else(|| (!self.wins.is_empty()).then_some(0))
+    }
+
+    fn redraw_all(&self) {
+        for w in &self.wins {
+            w.window.request_redraw();
         }
     }
 
+    fn flush_redraws(&mut self) {
+        let dirty = std::mem::take(&mut self.dirty);
+        for w in self.wins.iter().filter(|w| dirty.contains(&w.window.id())) {
+            w.window.request_redraw();
+        }
+    }
+
+    /// Makes a window for `workbench` and shows it.
+    fn add(&mut self, window: Arc<Window>, mut workbench: Workbench) {
+        let size = window.inner_size();
+        let renderer = render::Renderer::new(window.clone(), (size.width, size.height), window.scale_factor() as f32)
+            .expect("failed to initialize GPU renderer");
+        workbench.set_window(window.clone());
+        if self.checker.is_none() {
+            self.checker = Some(window.id());
+        } else {
+            workbench.set_update_checks(false);
+        }
+        self.front = Some(window.id());
+        self.wins.push(Win { window: window.clone(), renderer, workbench });
+        self.apply_effects();
+        window.focus_window();
+        window.request_redraw();
+    }
+
+    /// Opens the windows waiting in `pending`.
+    fn open_pending(&mut self, event_loop: &ActiveEventLoop) {
+        for saved in std::mem::take(&mut self.pending) {
+            let near = self.front_index().map(|i| self.wins[i].window.clone());
+            let attrs = window_attributes(event_loop, saved.bounds, near.as_deref());
+            let Ok(window) = event_loop.create_window(attrs) else { continue };
+            let workbench = Workbench::new_window(saved.folder, self.waker.clone());
+            self.add(Arc::new(window), workbench);
+        }
+        self.update_recent_menu();
+    }
+
+    fn open_window(&mut self, saved: SavedWindow) {
+        self.pending.push(saved);
+        let _ = self.proxy.send_event(UserEvent::OpenWindows);
+    }
+
+    /// File > Open Recent leaves out the front window's folder.
+    fn update_recent_menu(&self) {
+        if let Some(i) = self.front_index() {
+            update_recent_menu(&self.wins[i].workbench.recent_menu());
+        }
+    }
+
+    /// Closes window `i` (closing the last one quits).
+    fn close(&mut self, i: usize) {
+        if self.wins.len() == 1 {
+            return self.quit(None);
+        }
+        self.wins[i].workbench.activate();
+        if self.wins[i].workbench.close_window() {
+            self.remove(i);
+        }
+    }
+
+    fn remove(&mut self, i: usize) {
+        let win = self.wins.remove(i);
+        let id = win.window.id();
+        if self.front == Some(id) {
+            self.front = None;
+        }
+        if self.popup_owner == Some(id) {
+            self.popup_owner = None;
+        }
+        if self.checker == Some(id) {
+            self.checker = self.wins.first().map(|w| w.window.id());
+            if let Some(w) = self.wins.first_mut() {
+                w.workbench.set_update_checks(true);
+            }
+        }
+        drop(win);
+        self.update_recent_menu();
+    }
+
+    /// Quits: each window keeps or asks about its unsaved changes (`done`: one that already
+    /// did), then the windows are remembered for the next launch, the one in front first.
+    /// Cancelling keeps the windows that weren't asked yet; the others close.
+    fn quit(&mut self, done: Option<usize>) {
+        let mut order: Vec<WindowId> = self.wins.iter().map(|w| w.window.id()).collect();
+        if let Some(front) = self.front_index() {
+            let id = order.remove(front);
+            order.insert(0, id);
+        }
+        let saved: Vec<SavedWindow> = order.iter().filter_map(|id| self.index(*id)).map(|i| self.wins[i].workbench.saved_window()).collect();
+        let done = done.map(|i| self.wins[i].window.id());
+        for (n, id) in order.iter().enumerate() {
+            if Some(*id) == done {
+                continue;
+            }
+            let Some(i) = self.index(*id) else { continue };
+            self.wins[i].workbench.activate();
+            if !self.wins[i].workbench.quit() {
+                for closed in order[..n].iter().chain(done.iter()) {
+                    if let Some(j) = self.index(*closed) {
+                        self.remove(j);
+                    }
+                }
+                return;
+            }
+        }
+        workbench::save_windows(&saved);
+        self.quitting = true;
+        let _ = self.proxy.send_event(UserEvent::Exit);
+    }
+
     fn apply_effects(&mut self) {
-        let Some(window) = self.window.clone() else { return };
-        for effect in self.workbench.take_effects() {
-            match effect {
-                Effect::DragWindow => {
-                    let _ = window.drag_window();
-                }
-                Effect::ToggleMaximize => window.set_maximized(!window.is_maximized()),
-                Effect::SetFullscreen(on) => window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None))),
-                Effect::SetTitle(t) => window.set_title(&t),
-                Effect::Cursor(kind) => window.set_cursor(match kind {
-                    CursorKind::Default => CursorIcon::Default,
-                    CursorKind::Text => CursorIcon::Text,
-                    CursorKind::ColResize => CursorIcon::ColResize,
-                    CursorKind::RowResize => CursorIcon::RowResize,
-                    CursorKind::Pointer => CursorIcon::Pointer,
-                }),
-                Effect::SetAppearance { dark } => {
-                    window.set_theme(Some(if dark { winit::window::Theme::Dark } else { winit::window::Theme::Light }));
-                }
-                Effect::Popup { items, x, y } => show_popup(&window, items, x, y),
-                Effect::KeymapChanged => update_menu_accelerators(),
-                Effect::RecentChanged => update_recent_menu(&self.workbench.recent_menu()),
-                Effect::Exit => {
-                    self.quitting = true;
-                    let _ = self.proxy.send_event(UserEvent::Exit);
+        // Effects can cause more (opening a folder sets the title).
+        for _ in 0..4 {
+            let mut queued = Vec::new();
+            for w in &mut self.wins {
+                let id = w.window.id();
+                queued.extend(w.workbench.take_effects().into_iter().map(|e| (id, e)));
+            }
+            if queued.is_empty() {
+                return;
+            }
+            for (id, effect) in queued {
+                // (Gone: closed by an earlier effect.)
+                let Some(i) = self.index(id) else { continue };
+                let window = self.wins[i].window.clone();
+                match effect {
+                    Effect::DragWindow => {
+                        let _ = window.drag_window();
+                    }
+                    Effect::ToggleMaximize => window.set_maximized(!window.is_maximized()),
+                    Effect::SetFullscreen(on) => window.set_fullscreen(on.then_some(winit::window::Fullscreen::Borderless(None))),
+                    Effect::SetTitle(t) => window.set_title(&t),
+                    Effect::Cursor(kind) => window.set_cursor(match kind {
+                        CursorKind::Default => CursorIcon::Default,
+                        CursorKind::Text => CursorIcon::Text,
+                        CursorKind::ColResize => CursorIcon::ColResize,
+                        CursorKind::RowResize => CursorIcon::RowResize,
+                        CursorKind::Pointer => CursorIcon::Pointer,
+                    }),
+                    Effect::SetAppearance { dark } => {
+                        window.set_theme(Some(if dark { winit::window::Theme::Dark } else { winit::window::Theme::Light }));
+                    }
+                    Effect::Popup { items, x, y } => {
+                        self.popup_owner = Some(id);
+                        show_popup(&window, items, x, y);
+                    }
+                    Effect::KeymapChanged => update_menu_accelerators(),
+                    Effect::RecentChanged => self.update_recent_menu(),
+                    Effect::Exit => self.quit(Some(i)),
+                    Effect::Quit => self.quit(None),
+                    Effect::CloseWindow => self.close(i),
+                    Effect::NewWindow => self.open_window(SavedWindow::default()),
+                    Effect::OpenFolder { path, new_window } => {
+                        let open = self.wins.iter().position(|w| w.workbench.workspace_id().as_deref() == Some(path.as_path()));
+                        if let Some(j) = open {
+                            self.wins[j].window.focus_window();
+                        } else if new_window {
+                            self.open_window(SavedWindow { folder: Some(path), bounds: None });
+                        } else {
+                            self.wins[i].workbench.activate();
+                            self.wins[i].workbench.open_folder(&path);
+                            self.dirty.push(id);
+                        }
+                    }
                 }
             }
         }
     }
 
-    fn run_command(&mut self, cmd: Command, from_menu: bool) {
+    fn run_command(&mut self, i: usize, cmd: Command, from_menu: bool) {
         if from_menu {
             if let Some((last, t)) = self.last_key_command {
                 if last == cmd && t.elapsed().as_millis() < 150 {
@@ -522,11 +772,30 @@ impl Core {
                 }
             }
         }
-        self.workbench.run(cmd);
+        self.wins[i].workbench.run(cmd);
     }
 
-    fn scale(&self) -> f32 {
-        self.window.as_ref().map_or(1.0, |w| w.scale_factor() as f32)
+    /// A menu pick: a popup's goes to its window, the rest to the window in front.
+    fn menu(&mut self, id: muda::MenuId) {
+        let id = id.as_ref();
+        if let Some(n) = id.strip_prefix("popup:").and_then(|n| n.parse().ok()) {
+            if let Some(i) = self.popup_owner.and_then(|w| self.index(w)) {
+                self.dirty.push(self.wins[i].window.id());
+                self.wins[i].workbench.activate();
+                self.wins[i].workbench.popup_selected(n);
+            }
+            return;
+        }
+        let Some(i) = self.front_index() else { return };
+        self.dirty.push(self.wins[i].window.id());
+        self.wins[i].workbench.activate();
+        if let Some(n) = id.strip_prefix("recent:").and_then(|n| n.parse().ok()) {
+            self.wins[i].workbench.open_recent(n);
+        } else if let Some(n) = id.strip_prefix("dock:").and_then(|n| n.parse().ok()) {
+            self.wins[i].workbench.open_dock_recent(n);
+        } else if let Some(cmd) = Command::from_id(id) {
+            self.run_command(i, cmd, true);
+        }
     }
 }
 
@@ -578,58 +847,48 @@ fn translate_key(event: &winit::event::KeyEvent, mods: ModifiersState) -> KeyInp
 impl Core {
     /// Handles one input event (from `drain`, outside winit's handler).
     fn handle(&mut self, input: Input) {
-        let event = match input {
-            Input::Menu(id) => {
-                if let Some(i) = id.as_ref().strip_prefix("popup:").and_then(|i| i.parse().ok()) {
-                    self.workbench.popup_selected(i);
-                } else if let Some(i) = id.as_ref().strip_prefix("recent:").and_then(|i| i.parse().ok()) {
-                    self.workbench.open_recent(i);
-                } else if let Some(cmd) = Command::from_id(id.as_ref()) {
-                    self.run_command(cmd, true);
-                }
-                return;
-            }
-            Input::Window(e) => e,
+        let (id, event) = match input {
+            Input::Menu(id) => return self.menu(id),
+            Input::Window(id, e) => (id, e),
         };
-        let scale = self.scale();
+        let Some(i) = self.index(id) else { return };
+        self.dirty.push(id);
+        self.wins[i].workbench.activate();
+        if matches!(event, WindowEvent::CloseRequested) {
+            return self.close(i);
+        }
+        let w = &mut self.wins[i];
+        let scale = w.window.scale_factor() as f32;
         match event {
-            // Closing the window quits (hot exit or a save prompt).
-            WindowEvent::CloseRequested => self.workbench.run(Command::Quit),
-            WindowEvent::Resized(size) => {
-                if let Some(r) = &mut self.renderer {
-                    r.resize(size.width, size.height, scale);
-                }
-            }
+            WindowEvent::Resized(size) => w.renderer.resize(size.width, size.height, scale),
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
-                if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
-                    let size = w.inner_size();
-                    r.resize(size.width, size.height, scale_factor as f32);
-                }
+                let size = w.window.inner_size();
+                w.renderer.resize(size.width, size.height, scale_factor as f32);
             }
             WindowEvent::ModifiersChanged(m) => {
                 self.modifiers = m.state();
-                self.workbench.set_modifiers(self.modifiers.control_key(), self.modifiers.alt_key());
+                w.workbench.set_modifiers(self.modifiers.control_key(), self.modifiers.alt_key());
             }
             WindowEvent::CursorMoved { position, .. } => {
-                self.workbench.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
+                w.workbench.mouse_move(position.x as f32 / scale, position.y as f32 / scale);
             }
             WindowEvent::MouseInput { state, button: MouseButton::Left, .. } => match state {
                 ElementState::Pressed => {
-                    let (x, y) = self.workbench.mouse_position();
-                    self.workbench.mouse_down(x, y, self.modifiers.shift_key(), self.modifiers.super_key(), self.modifiers.alt_key());
+                    let (x, y) = w.workbench.mouse_position();
+                    w.workbench.mouse_down(x, y, self.modifiers.shift_key(), self.modifiers.super_key(), self.modifiers.alt_key());
                 }
-                ElementState::Released => self.workbench.mouse_up(),
+                ElementState::Released => w.workbench.mouse_up(),
             },
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                let (x, y) = self.workbench.mouse_position();
-                self.workbench.context_menu(x, y);
+                let (x, y) = w.workbench.mouse_position();
+                w.workbench.context_menu(x, y);
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let (dx, dy) = match delta {
                     MouseScrollDelta::PixelDelta(p) => (p.x as f32 / scale, p.y as f32 / scale),
                     MouseScrollDelta::LineDelta(x, y) => (x * 3.0 * editor::line_height(), y * 3.0 * editor::line_height()),
                 };
-                self.workbench.scroll(dx, dy);
+                w.workbench.scroll(dx, dy);
             }
             WindowEvent::KeyboardInput { event, is_synthetic: false, .. } => {
                 if event.state == ElementState::Pressed {
@@ -637,12 +896,16 @@ impl Core {
                     if let Some(cmd) = input.command() {
                         self.last_key_command = Some((cmd, Instant::now()));
                     }
-                    self.workbench.key(input);
+                    w.workbench.key(input);
                 }
             }
-            WindowEvent::DroppedFile(path) => self.workbench.drop_path(&path),
-            WindowEvent::Focused(true) => self.workbench.window_focused(),
-            WindowEvent::Focused(false) => self.workbench.window_blurred(),
+            WindowEvent::DroppedFile(path) => w.workbench.drop_path(&path),
+            WindowEvent::Focused(true) => {
+                w.workbench.window_focused();
+                self.front = Some(id);
+                self.update_recent_menu();
+            }
+            WindowEvent::Focused(false) => w.workbench.window_blurred(),
             _ => {}
         }
     }
@@ -651,46 +914,30 @@ impl Core {
 impl ApplicationHandler<UserEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let mut core = self.shared.core.borrow_mut();
-        if core.window.is_some() {
-            return;
-        }
-        let mut attrs = Window::default_attributes()
-            .with_title("Orbvane")
-            .with_inner_size(LogicalSize::new(1400.0, 900.0))
-            .with_min_inner_size(LogicalSize::new(640.0, 400.0))
-            .with_titlebar_transparent(true)
-            .with_title_hidden(true)
-            .with_fullsize_content_view(true);
-        // Last session's size and position, if that spot is still on a screen.
-        if let Some(b) = workbench::window_bounds() {
-            let on_screen = event_loop.available_monitors().any(|m| {
-                let (pos, size) = (m.position().to_logical::<f64>(m.scale_factor()), m.size().to_logical::<f64>(m.scale_factor()));
-                b.x + 100.0 > pos.x && b.x < pos.x + size.width - 100.0 && b.y >= pos.y - 50.0 && b.y < pos.y + size.height - 100.0
-            });
-            attrs = attrs.with_inner_size(LogicalSize::new(b.width.max(640.0), b.height.max(400.0))).with_maximized(b.maximized);
-            if on_screen {
-                attrs = attrs.with_position(winit::dpi::LogicalPosition::new(b.x, b.y));
-            }
-        }
+        let Some(workbench) = core.first.take() else { return };
+        let attrs = window_attributes(event_loop, workbench::window_bounds(), None);
         let window = Arc::new(event_loop.create_window(attrs).expect("failed to create window"));
-        let size = window.inner_size();
-        let renderer = render::Renderer::new(window.clone(), (size.width, size.height), window.scale_factor() as f32)
-            .expect("failed to initialize GPU renderer");
 
         let menu = build_menu();
         menu.init_for_nsapp();
-        update_recent_menu(&core.workbench.recent_menu());
+        install_dock_menu();
         let proxy = core.proxy.clone();
         MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
             let _ = proxy.send_event(UserEvent::Menu(e.id().clone()));
         }));
-
         self.menu = Some(menu);
-        core.renderer = Some(renderer);
-        core.workbench.set_window(window.clone());
-        core.window = Some(window);
-        core.apply_effects();
-        core.redraw();
+
+        let others = if core.restore_others { workbench.windows_to_restore() } else { Vec::new() };
+        core.add(window, workbench);
+        core.update_recent_menu();
+        // The other windows of the last session, then the first one back in front.
+        if !others.is_empty() {
+            let first = core.wins[0].window.clone();
+            core.pending.extend(others);
+            core.open_pending(event_loop);
+            first.focus_window();
+            core.front = Some(first.id());
+        }
     }
 
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
@@ -699,51 +946,59 @@ impl ApplicationHandler<UserEvent> for App {
             UserEvent::Exit => event_loop.exit(),
             UserEvent::Wake => {
                 if let Ok(core) = self.shared.core.try_borrow() {
-                    core.redraw();
+                    core.redraw_all();
+                }
+            }
+            // (Busy with a dialog: `drain` asks again.)
+            UserEvent::OpenWindows => {
+                if let Ok(mut core) = self.shared.core.try_borrow_mut() {
+                    core.open_pending(event_loop);
                 }
             }
         }
     }
 
-    fn window_event(&mut self, _event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+    fn window_event(&mut self, _event_loop: &ActiveEventLoop, id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::RedrawRequested => {
                 // Skipped while a dialog is open (its caller holds the core); `drain` redraws after.
                 let Ok(mut core) = self.shared.core.try_borrow_mut() else { return };
                 let core = &mut *core;
-                if let Some(r) = &mut core.renderer {
-                    // Going full screen doesn't always send Resized: draw at the window's size.
-                    if let Some(w) = &core.window {
-                        let size = w.inner_size();
-                        if (size.width, size.height) != r.physical_size() {
-                            r.resize(size.width, size.height, w.scale_factor() as f32);
-                        }
-                    }
-                    let bg = core.workbench.background();
-                    let wb = &mut core.workbench;
-                    if r.frame(bg, |c| wb.draw(c)) {
-                        core.redraw();
-                    }
+                let Some(i) = core.index(id) else { return };
+                let w = &mut core.wins[i];
+                w.workbench.activate();
+                // Going full screen doesn't always send Resized: draw at the window's size.
+                let size = w.window.inner_size();
+                if (size.width, size.height) != w.renderer.physical_size() {
+                    w.renderer.resize(size.width, size.height, w.window.scale_factor() as f32);
+                }
+                let bg = w.workbench.background();
+                let wb = &mut w.workbench;
+                if w.renderer.frame(bg, |c| wb.draw(c)) {
+                    w.window.request_redraw();
                 }
                 core.apply_effects();
+                core.flush_redraws();
             }
             // Dragging the window must start while AppKit is still handling the mouse-down
             // (it uses the current event), so title bar clicks are handled right away. They
             // never open dialogs.
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. }
                 if self.shared.queue.borrow().is_empty()
-                    && self.shared.core.try_borrow().is_ok_and(|c| c.workbench.title_bar_at_mouse()) =>
+                    && self.shared.core.try_borrow().is_ok_and(|c| c.index(id).is_some_and(|i| c.wins[i].workbench.title_bar_at_mouse())) =>
             {
                 let mut core = self.shared.core.borrow_mut();
-                core.handle(Input::Window(event));
+                core.handle(Input::Window(id, event));
                 core.apply_effects();
-                core.redraw();
+                core.flush_redraws();
             }
             // macOS can show the window after the first frames were drawn (launched with
             // `open`): draw again once it's actually visible, or it stays blank.
             WindowEvent::Occluded(false) => {
                 if let Ok(core) = self.shared.core.try_borrow() {
-                    core.redraw();
+                    if let Some(i) = core.index(id) {
+                        core.wins[i].window.request_redraw();
+                    }
                 }
             }
             WindowEvent::MouseInput { button: MouseButton::Left | MouseButton::Right, .. }
@@ -755,23 +1010,36 @@ impl ApplicationHandler<UserEvent> for App {
             | WindowEvent::MouseWheel { .. }
             | WindowEvent::KeyboardInput { is_synthetic: false, .. }
             | WindowEvent::DroppedFile(_)
-            | WindowEvent::Focused(_) => self.push(Input::Window(event)),
+            | WindowEvent::Focused(_) => self.push(Input::Window(id, event)),
             _ => {}
         }
     }
 
     /// The app is ending: after Quit, or when macOS terminates it without asking us (logout,
-    /// Dock "Quit"), in which case we save the session first. macOS then calls `exit()` from
+    /// Dock "Quit"), in which case we save the sessions first. macOS then calls `exit()` from
     /// inside the run loop, so nothing is dropped normally: stop servers and shells here, and
-    /// leave the window and GPU objects to the OS (tearing wgpu down during exit panics).
+    /// leave the windows and GPU objects to the OS (tearing wgpu down during exit panics).
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
-        if let Ok(mut core) = self.shared.core.try_borrow_mut() {
-            if !core.quitting {
-                core.workbench.terminating();
+        let Ok(mut core) = self.shared.core.try_borrow_mut() else { return };
+        if !core.quitting {
+            let front = core.front_index().unwrap_or(0);
+            let mut saved = Vec::new();
+            for (i, w) in core.wins.iter_mut().enumerate() {
+                w.workbench.activate();
+                let s = w.workbench.saved_window();
+                if i == front {
+                    saved.insert(0, s);
+                } else {
+                    saved.push(s);
+                }
+                w.workbench.terminating();
             }
-            core.workbench.shutdown();
-            std::mem::forget(core.renderer.take());
-            std::mem::forget(core.window.take());
+            workbench::save_windows(&saved);
+        }
+        for w in std::mem::take(&mut core.wins) {
+            let mut w = w;
+            w.workbench.shutdown();
+            std::mem::forget(w);
         }
     }
 
@@ -780,20 +1048,23 @@ impl ApplicationHandler<UserEvent> for App {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
         };
-        match core.workbench.next_wakeup() {
-            Some(t) if t <= Instant::now() => {
-                core.redraw();
-                event_loop.set_control_flow(ControlFlow::Wait);
+        let now = Instant::now();
+        let mut next: Option<Instant> = None;
+        for w in &core.wins {
+            w.workbench.activate();
+            match w.workbench.next_wakeup() {
+                Some(t) if t <= now => w.window.request_redraw(),
+                Some(t) => next = Some(next.map_or(t, |n| n.min(t))),
+                None => {}
             }
-            Some(t) => event_loop.set_control_flow(ControlFlow::WaitUntil(t)),
-            None => event_loop.set_control_flow(ControlFlow::Wait),
         }
+        event_loop.set_control_flow(next.map_or(ControlFlow::Wait, ControlFlow::WaitUntil));
     }
 
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: winit::event::StartCause) {
         if matches!(cause, winit::event::StartCause::ResumeTimeReached { .. }) {
             if let Ok(core) = self.shared.core.try_borrow() {
-                core.redraw();
+                core.redraw_all();
             }
         }
     }
@@ -827,12 +1098,19 @@ fn main() {
     let waker: lsp::Waker = std::sync::Arc::new(move || {
         let _ = lsp_proxy.send_event(UserEvent::Wake);
     });
+    let restore_others = folder.is_none() && files.is_empty();
     let core = Core {
-        window: None,
-        renderer: None,
-        workbench: Workbench::new(folder, &files, waker),
+        wins: Vec::new(),
+        first: Some(Workbench::new(folder, &files, waker.clone())),
+        restore_others,
+        pending: Vec::new(),
+        front: None,
+        popup_owner: None,
+        checker: None,
+        dirty: Vec::new(),
         modifiers: ModifiersState::empty(),
         proxy,
+        waker,
         last_key_command: None,
         quitting: false,
     };

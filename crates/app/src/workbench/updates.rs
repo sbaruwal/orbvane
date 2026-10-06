@@ -62,6 +62,8 @@ pub(super) struct Updates {
     tx: Sender<Reply>,
     rx: Receiver<Reply>,
     next_check: Instant,
+    /// This window checks on its own (one window does, with several open).
+    checks: bool,
 }
 
 impl Default for Updates {
@@ -80,6 +82,7 @@ impl Default for Updates {
             tx,
             rx,
             next_check: Instant::now() + FIRST_CHECK,
+            checks: true,
         }
     }
 }
@@ -98,11 +101,16 @@ impl Workbench {
     }
 
     pub(super) fn updates_deadline(&self) -> Option<Instant> {
-        (self.update_mode() == "default").then_some(self.updates.next_check)
+        (self.updates.checks && self.update_mode() == "default").then_some(self.updates.next_check)
+    }
+
+    /// Whether this window checks for updates on its own (only one window of several does).
+    pub fn set_update_checks(&mut self, on: bool) {
+        self.updates.checks = on;
     }
 
     pub(super) fn updates_tick(&mut self) {
-        if Instant::now() >= self.updates.next_check {
+        if self.updates.checks && Instant::now() >= self.updates.next_check {
             self.updates.next_check = Instant::now() + INTERVAL;
             if self.update_mode() == "default" && matches!(self.updates.state, State::Idle | State::Available(_)) {
                 self.check_for_updates(false);

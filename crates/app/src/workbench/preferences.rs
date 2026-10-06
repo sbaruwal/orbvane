@@ -49,6 +49,8 @@ pub(crate) enum PopupAction {
     ExtCommand(String, Vec<Value>),
     /// The Assistant's agent menu.
     Agent(super::AgentAction),
+    /// The status bar's server menu.
+    Server(crate::servers::ServerKey, super::language_servers::ServerAction),
     /// The entry is a submenu with these entries.
     Submenu(Vec<(PopupItem, PopupAction)>),
 }
@@ -72,7 +74,8 @@ impl AutoSaveState {
 impl Workbench {
     /// Re-reads the effective settings into the config, theme and fonts.
     pub(super) fn apply_settings(&mut self) {
-        config::set(Config::from_store(&self.settings));
+        self.config = Config::from_store(&self.settings);
+        config::set(self.config);
         let theme = self.settings.string("workbench.colorTheme");
         if theme != self.theme.name {
             self.set_theme(&theme);
@@ -288,6 +291,7 @@ impl Workbench {
             PopupAction::Test(key, action) => self.test_popup(key, action),
             PopupAction::OutputChannel(name) => self.show_output_channel(&name, false),
             PopupAction::Agent(action) => self.agent_action(action),
+            PopupAction::Server(key, action) => self.server_action(key, action),
             PopupAction::Extension(id, action) => self.extension_menu_action(&id, action),
             PopupAction::ExtCommand(command, args) => self.ext_execute(&command, args, None),
             PopupAction::SetValue(scope, key, value) => {

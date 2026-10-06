@@ -9,13 +9,22 @@ use std::time::Instant;
 use language::Lang;
 
 use super::notifications::Severity;
-use super::Workbench;
+use super::{PopupItem, Workbench};
+use crate::commands::Command;
 use crate::config;
 use crate::servers::{MissingServer, ServerKey, Servers};
 
 const INSTALL: &str = "Install";
 const COPY: &str = "Copy Install Command";
 const TRY_AGAIN: &str = "Try Again";
+
+/// What the status bar's server menu does to a server.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum ServerAction {
+    Start,
+    Stop,
+    Restart,
+}
 
 impl Workbench {
     /// The documents on screen (each group's active tab).
@@ -38,7 +47,7 @@ impl Workbench {
     }
 
     /// The server for the active editor's file, whether or not it runs.
-    fn active_server(&self) -> Option<(ServerKey, Lang)> {
+    pub(super) fn active_server(&self) -> Option<(ServerKey, Lang)> {
         let ed = self.active_editor()?;
         let doc = self.docs[ed.doc].as_ref()?;
         let path = doc.buffer.path()?;
@@ -67,6 +76,39 @@ impl Workbench {
                 let what = if n == 1 { "1 language server".to_string() } else { format!("{n} language servers") };
                 self.set_status_message(&format!("Stopped {what}. Restart Language Server starts them again."));
             }
+        }
+    }
+
+    /// The status bar's server item: start, stop or restart the active file's server.
+    pub(super) fn server_menu(&mut self, x: f32, y: f32) {
+        use super::preferences::PopupAction;
+        let item = |label: String, enabled: bool| PopupItem::Item { label, enabled, checked: None };
+        let mut entries = Vec::new();
+        if let Some((key, _)) = self.active_server() {
+            let name = Self::server_label(key.0);
+            if self.lsp.is_held(&key) {
+                entries.push((item(format!("Start {name}"), true), PopupAction::Server(key, ServerAction::Start)));
+            } else {
+                entries.push((item(format!("Restart {name}"), true), PopupAction::Server(key.clone(), ServerAction::Restart)));
+                entries.push((item(format!("Stop {name}"), true), PopupAction::Server(key, ServerAction::Stop)));
+            }
+            entries.push((PopupItem::Separator, PopupAction::None));
+        }
+        let running = !self.lsp.running().is_empty();
+        entries.push((item("Stop All Language Servers".into(), running), PopupAction::Run(Command::StopLanguageServers)));
+        entries.push((item("Show Output".into(), true), PopupAction::OutputChannel(super::output::LANGUAGE_SERVERS.into())));
+        self.show_popup(entries, x, y);
+    }
+
+    pub(super) fn server_action(&mut self, key: ServerKey, action: ServerAction) {
+        let name = Self::server_label(key.0);
+        match action {
+            ServerAction::Stop => {
+                self.lsp.stop_held(&key);
+                self.set_status_message(&format!("Stopped {name}."));
+            }
+            // It starts again for the files shown (`lsp_tick`).
+            ServerAction::Start | ServerAction::Restart => self.lsp.restart(&[key]),
         }
     }
 
@@ -205,6 +247,60 @@ mod tests {
     fn show(wb: &mut Workbench, path: &std::path::Path) {
         wb.open_file(path);
         wb.lsp_tick();
+    }
+
+    #[test]
+    fn the_status_bar_menu_stops_and_starts_the_server() {
+        let (mut wb, dir) = workbench_with("menu", &[("a.json", "{\"a\": 1}\n")]);
+        let json = dir.join("a.json");
+        show(&mut wb, &json);
+        tick_until(&mut wb, "the JSON server", |wb| wb.lsp.is_running(&json));
+        let key = wb.active_server().unwrap().0;
+        // Running: Restart and Stop.
+        wb.server_menu(0.0, 0.0);
+        let labels = |wb: &mut Workbench| -> Vec<String> {
+            wb.take_effects()
+                .into_iter()
+                .find_map(|e| match e {
+                    super::super::Effect::Popup { items, .. } => Some(items),
+                    _ => None,
+                })
+                .unwrap()
+                .into_iter()
+                .filter_map(|i| match i {
+                    PopupItem::Item { label, .. } => Some(label),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(labels(&mut wb), ["Restart JSON server", "Stop JSON server", "Stop All Language Servers", "Show Output"]);
+        wb.server_action(key.clone(), ServerAction::Stop);
+        for _ in 0..20 {
+            wb.lsp_tick();
+        }
+        assert!(!wb.lsp.is_running(&json), "a stopped server stays stopped while its file shows");
+        // Stopped: Start.
+        wb.server_menu(0.0, 0.0);
+        assert_eq!(labels(&mut wb)[0], "Start JSON server");
+        wb.server_action(key, ServerAction::Start);
+        tick_until(&mut wb, "the server to start again", |wb| wb.lsp.is_running(&json));
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn problems_toggle() {
+        let (mut wb, dir) = workbench_with("problems", &[]);
+        wb.run(Command::ToggleProblems);
+        assert!(wb.panel_visible && wb.panel_tab == 0);
+        wb.run(Command::ToggleProblems);
+        assert!(!wb.panel_visible);
+        // From another panel tab it switches to Problems.
+        wb.run(Command::ToggleOutput);
+        wb.run(Command::ToggleProblems);
+        assert!(wb.panel_visible && wb.panel_tab == 0);
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

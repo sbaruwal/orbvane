@@ -85,7 +85,8 @@ mod workspaces;
 pub(crate) use assistant::AgentAction;
 pub use debug::DebugPick;
 pub use git_actions::{GitInput, GitPick};
-pub use session::window_bounds;
+pub use recent::dock_folders;
+pub use session::{save_windows, window_bounds, SavedWindow, WindowBounds};
 
 const TITLE_H: f32 = 35.0;
 const STATUS_H: f32 = 30.0;
@@ -425,8 +426,17 @@ pub enum Effect {
     SetAppearance { dark: bool },
     /// Show a native popup menu at a window position; picks come back via `popup_selected`.
     Popup { items: Vec<PopupItem>, x: f32, y: f32 },
-    /// The session is saved; end the app.
+    /// The session is saved; end the app (quitting the other windows first).
     Exit,
+    /// Quit: every window keeps or asks about its unsaved changes, then the app ends.
+    Quit,
+    /// Close this window (closing the last one quits).
+    CloseWindow,
+    /// Open an empty window.
+    NewWindow,
+    /// Open a folder the user picked: the window that already has it comes forward, else it
+    /// opens in a new window or in this one (`window.openFoldersInNewWindow`).
+    OpenFolder { path: PathBuf, new_window: bool },
     /// Shortcuts changed (`keybindings.json`): update the menus' key equivalents.
     KeymapChanged,
     /// The recent folders changed: rebuild File > Open Recent (`Workbench::recent_menu`).
@@ -628,13 +638,32 @@ pub struct Workbench {
     welcome: welcome::Welcome,
     /// The editor's tools for the agent (MCP).
     tools: mcp::EditorTools,
+    /// This window's settings for hot paths (`config::get()` once `activate`d).
+    config: config::Config,
 }
 
 impl Workbench {
+    /// The first window: `folder` and `files` from the command line, else the last folder
+    /// (`window.restoreWindows`).
     pub fn new(folder: Option<PathBuf>, files: &[PathBuf], waker: lsp::Waker) -> Self {
-        // Before anything asks which language a file is (extensions add languages).
-        crate::contributions::load();
-        let languages_problem = crate::languages::load();
+        Self::create(folder, files, waker, true)
+    }
+
+    /// A window opened while the app runs (New Window, a folder opened in a new window): the
+    /// folder with its saved session, or an empty window.
+    pub fn new_window(folder: Option<PathBuf>, waker: lsp::Waker) -> Self {
+        Self::create(folder, &[], waker, false)
+    }
+
+    fn create(folder: Option<PathBuf>, files: &[PathBuf], waker: lsp::Waker, launch: bool) -> Self {
+        // Before anything asks which language a file is (extensions add languages). Once per
+        // launch: languages are indexes every window shares.
+        let languages_problem = if launch {
+            crate::contributions::load();
+            crate::languages::load()
+        } else {
+            Ok(())
+        };
         let mut wb = Self {
             theme: Theme::default_theme(),
             tree: None,
@@ -744,6 +773,7 @@ impl Workbench {
             assistant: Default::default(),
             welcome: Default::default(),
             tools: Default::default(),
+            config: config::Config::default(),
         };
         wb.apply_settings();
         if let Err(e) = crate::keymap::load() {
@@ -754,7 +784,7 @@ impl Workbench {
         }
         wb.start_askpass();
         // Without arguments, reopen the last folder (`window.restoreWindows`).
-        let folder = folder.or_else(|| if files.is_empty() { session::folder_to_restore(&wb.settings) } else { None });
+        let folder = if launch { folder.or_else(|| if files.is_empty() { session::folder_to_restore(&wb.settings) } else { None }) } else { folder };
         match folder {
             Some(path) if path.is_dir() || crate::workspace::is_workspace_file(&path) => wb.open_folder(&path),
             Some(path) if path.is_file() => {
@@ -763,7 +793,7 @@ impl Workbench {
                 }
                 wb.open_file(&path);
             }
-            _ if wb.settings.string("window.restoreWindows") != "none" => wb.restore_session(),
+            _ if launch && wb.settings.string("window.restoreWindows") != "none" => wb.restore_session(),
             _ => {}
         }
         for file in files {
@@ -903,6 +933,28 @@ impl Workbench {
             self.open_folder_raw(path);
             self.restore_session();
         }
+    }
+
+    /// Opens a folder the user picked (Open Folder, Open Recent, the Welcome page): in a new
+    /// window when this one has a folder (`window.openFoldersInNewWindow`), and a window that
+    /// has it already comes forward instead (`main.rs` decides, knowing the windows).
+    pub(super) fn open_folder_by_user(&mut self, path: &Path) {
+        if self.workspace_id().as_deref() == Some(path) {
+            return;
+        }
+        let new_window = match self.settings.string("window.openFoldersInNewWindow").as_str() {
+            "on" => true,
+            "off" => false,
+            _ => self.workspace_id().is_some(),
+        };
+        self.effects.push(Effect::OpenFolder { path: path.to_path_buf(), new_window });
+    }
+
+    /// Makes this window's settings the ones `config::get()` reads (several windows share
+    /// the thread, each with its own workspace settings): before handling its input or
+    /// drawing it.
+    pub fn activate(&self) {
+        config::set(self.config);
     }
 
     /// Opens a folder, or a `.code-workspace` file's folders.
@@ -1191,14 +1243,13 @@ impl Workbench {
             Command::NewFile => self.new_file(),
             Command::OpenFolder => {
                 if let Some(path) = self.file_dialog().pick_folder() {
-                    self.open_folder(&path);
+                    self.open_folder_by_user(&path);
                 }
             }
-            Command::Quit => {
-                if self.quit() {
-                    self.effects.push(Effect::Exit);
-                }
-            }
+            Command::Quit => self.effects.push(Effect::Quit),
+            Command::NewWindow => self.effects.push(Effect::NewWindow),
+            Command::CloseWindow => self.effects.push(Effect::CloseWindow),
+            Command::ToggleProblems => self.toggle_problems(),
             Command::CloseFolder => {
                 // With hot exit, the folder's unsaved changes are kept for next time.
                 let hot = self.hot_exit();
@@ -1731,7 +1782,7 @@ impl Workbench {
                     self.insert_snippet(a, z, &body);
                 }
             }
-            Action::OpenFolder(path) => self.open_folder(&path),
+            Action::OpenFolder(path) => self.open_folder_by_user(&path),
             Action::RemoveRootFolder(path) => self.remove_folder_from_workspace(&path),
             Action::Run(cmd) => {
                 self.theme_before_picker = None;
@@ -2552,14 +2603,8 @@ impl Workbench {
                     self.focus = Focus::Editor;
                 }
             }
-            Hit::StatusProblems => {
-                self.panel_visible = true;
-                self.panel_tab = 0;
-            }
-            Hit::StatusServer => {
-                self.panel_visible = true;
-                self.panel_tab = 1; // Output
-            }
+            Hit::StatusProblems => self.toggle_problems(),
+            Hit::StatusServer => self.server_menu(x, y),
             Hit::StatusTerminal => self.run(Command::ToggleTerminal),
             Hit::ProblemRow(i) => self.open_problem(i),
             Hit::TerminalPane(p) => self.terminal_mouse_down(p, x, y),
@@ -3790,7 +3835,13 @@ impl Workbench {
         // The active file's server: a check when it's ready, a spinner with its progress while busy.
         let path = self.active_doc().and_then(|d| d.buffer.path().map(Path::to_path_buf));
         let server = path.as_deref().and_then(|p| self.lsp.key_for(p));
+        // A server stopped by hand keeps its item, to start it from there.
+        let held = self.active_server().map(|(k, _)| k).filter(|k| server.is_none() && self.lsp.is_held(k));
         let progress = self.lsp.progress_text();
+        if let Some(key) = &held {
+            let text = format!("{}: stopped", Self::server_label(key.0));
+            x += self.status_pill(c, x, r, Some((&icons::DEBUG_STOP, fg, 0)), &text, &style, Hit::StatusServer) + gap;
+        }
         if let Some(key) = &server {
             let name = Self::server_label(key.0);
             let ready = self.lsp.ready(key) == Some(true);

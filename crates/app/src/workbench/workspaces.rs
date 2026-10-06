@@ -23,7 +23,7 @@ impl Workbench {
     }
 
     /// What the window has open: the workspace file, or the single folder.
-    pub(super) fn workspace_id(&self) -> Option<PathBuf> {
+    pub fn workspace_id(&self) -> Option<PathBuf> {
         self.workspace_file.clone().or_else(|| self.folder())
     }
 
@@ -244,7 +244,7 @@ impl Workbench {
     /// File > Open Workspace from File...
     pub(super) fn open_workspace_from_file(&mut self) {
         let Some(file) = self.file_dialog().set_title("Open Workspace from File").add_filter("Code Workspace", &[ws::EXTENSION]).pick_file() else { return };
-        self.open_folder(&file);
+        self.open_folder_by_user(&file);
     }
 
     /// Picks up edits to the workspace file made outside (checked about once a second).
