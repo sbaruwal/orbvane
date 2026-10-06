@@ -156,3 +156,66 @@ fn maps_typescript_sources() {
     s.event("terminated");
     s.request("disconnect", json!({}));
 }
+
+/// Breakpoints hit in a child process the program starts and in a worker thread, each its own
+/// thread.
+#[test]
+fn follows_child_processes_and_workers() {
+    let Some(node) = node() else { return eprintln!("no node; skipped") };
+    let dir = scratch("children");
+    let main = dir.join("main.js");
+    let child = dir.join("child.js");
+    let worker = dir.join("worker.js");
+    std::fs::write(&main, "const { execFileSync } = require('child_process');\nconst { Worker } = require('worker_threads');\nconst out = execFileSync(process.execPath, [__dirname + '/child.js']).toString();\nconsole.log('child said', out.trim());\nconst w = new Worker(__dirname + '/worker.js');\nw.on('message', (m) => { console.log('worker said', m); });\n").unwrap();
+    std::fs::write(&child, "const word = 'hello';\nconsole.log(word);\n").unwrap();
+    std::fs::write(&worker, "const { parentPort } = require('worker_threads');\nconst n = 6 * 7;\nparentPort.postMessage(n);\n").unwrap();
+    let mut s = Session::start();
+    s.request("initialize", json!({ "adapterID": "node" }));
+    s.request("launch", json!({ "program": main, "runtimeExecutable": node, "skipFiles": ["<node_internals>/**"] }));
+    s.event("initialized");
+    s.request("setBreakpoints", json!({ "source": { "path": child }, "breakpoints": [{ "line": 2 }] }));
+    s.request("setBreakpoints", json!({ "source": { "path": worker }, "breakpoints": [{ "line": 3 }] }));
+    s.request("configurationDone", json!({}));
+
+    // The child process: a thread of its own, stopped at its breakpoint.
+    let started = s.event("thread");
+    assert_eq!(started["reason"], "started");
+    let stop = s.event("stopped");
+    assert_eq!(stop["reason"], "breakpoint");
+    let t = stop["threadId"].as_i64().unwrap();
+    assert_ne!(t, 1);
+    let threads = s.request("threads", json!({}));
+    let names: Vec<&str> = threads["threads"].as_array().unwrap().iter().filter_map(|t| t["name"].as_str()).collect();
+    assert!(names.iter().any(|n| n.starts_with("child.js [")), "{names:?}");
+    let frames = s.request("stackTrace", json!({ "threadId": t }));
+    let top = frames["stackFrames"][0].clone();
+    assert_eq!((top["source"]["path"].as_str(), top["line"].as_i64()), (child.to_str(), Some(2)));
+    let e = s.request("evaluate", json!({ "expression": "word", "frameId": top["id"], "context": "watch" }));
+    assert_eq!(e["result"], "'hello'");
+    s.request("continue", json!({ "threadId": t }));
+    assert_eq!(s.event("thread")["reason"], "exited");
+
+    // The worker.
+    let started = s.event("thread");
+    assert_eq!(started["reason"], "started");
+    let stop = s.event("stopped");
+    let w = stop["threadId"].as_i64().unwrap();
+    let frames = s.request("stackTrace", json!({ "threadId": w }));
+    let top = frames["stackFrames"][0].clone();
+    assert_eq!((top["source"]["path"].as_str(), top["line"].as_i64()), (worker.to_str(), Some(3)));
+    let scopes = s.request("scopes", json!({ "frameId": top["id"] }));
+    let all: Vec<Value> = scopes["scopes"].as_array().unwrap().clone();
+    let mut found = false;
+    for scope in all.iter().filter(|s| s["expensive"] != true) {
+        let vars = s.request("variables", json!({ "variablesReference": scope["variablesReference"] }));
+        found |= vars["variables"].as_array().unwrap().iter().any(|v| v["name"] == "n" && v["value"] == "42");
+    }
+    assert!(found, "{scopes}");
+    s.request("continue", json!({ "threadId": w }));
+
+    assert_eq!(s.event("exited")["exitCode"], 0);
+    s.event("terminated");
+    let out = s.output();
+    assert!(out.contains("child said hello") && out.contains("worker said 42"), "{out}");
+    s.request("disconnect", json!({}));
+}

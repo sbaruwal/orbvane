@@ -154,6 +154,10 @@ pub(super) struct Session {
     ending_since: Option<Instant>,
     /// Whether the session has stopped before (the view opens on the first stop).
     stopped_once: bool,
+    /// Other threads that stopped on their own while one was shown (adapters that stop one
+    /// thread at a time, like Node.js with child processes and workers): shown in turn when
+    /// the shown one continues.
+    pub waiting: Vec<dap::Stopped>,
 }
 
 impl Session {
@@ -849,6 +853,7 @@ impl Workbench {
             watch_results: Vec::new(),
             ending_since: None,
             stopped_once: false,
+            waiting: Vec::new(),
         };
         // `Client::spawn` sent `initialize` as request 1.
         session.pending.insert(1, (Pending::Other, 0));
@@ -1118,28 +1123,29 @@ impl Workbench {
             }
             "stopped" => {
                 let stopped = dap::Stopped::parse(body);
-                s.state = State::Stopped;
-                s.generation += 1;
-                s.thread = stopped.thread.or(s.thread);
-                s.stopped = Some(stopped);
-                s.frames.clear();
-                s.frame = None;
-                s.scopes.clear();
-                s.children.clear();
-                s.send("threads", Value::Null, Pending::Threads);
-                if let Some(t) = s.thread {
-                    s.send("stackTrace", json!({ "threadId": t, "startFrame": 0, "levels": 100 }), Pending::StackTrace(t));
+                // Another thread stopped while one is shown: it waits its turn.
+                if s.state == State::Stopped && !stopped.all_threads && stopped.thread.is_some() && stopped.thread != s.thread {
+                    s.waiting.retain(|w| w.thread != stopped.thread);
+                    s.waiting.push(stopped);
+                    s.send("threads", Value::Null, Pending::Threads);
+                    return;
                 }
-                // The Run and Debug view opens on the first stop (`debug.openDebug`).
-                if !s.stopped_once {
-                    s.stopped_once = true;
-                    self.view = View::Debug;
-                    self.sidebar_visible = true;
-                }
+                self.debug_show_stop(stopped);
             }
             "continued" => {
-                if s.state == State::Stopped {
+                // Omitted means all of them.
+                let all = body["allThreadsContinued"].as_bool().unwrap_or(true);
+                let thread = body["threadId"].as_i64();
+                if all {
+                    s.waiting.clear();
+                } else {
+                    s.waiting.retain(|w| w.thread != thread);
+                }
+                if s.state == State::Stopped && (all || thread == s.thread) {
                     s.resumed();
+                    if let Some(next) = s.waiting.pop() {
+                        self.debug_show_stop(next);
+                    }
                 }
             }
             "output" => {
@@ -1160,6 +1166,9 @@ impl Workbench {
                 }
             }
             "thread" => {
+                if body["reason"] == "exited" {
+                    s.waiting.retain(|w| w.thread != body["threadId"].as_i64());
+                }
                 if s.state == State::Stopped {
                     s.send("threads", Value::Null, Pending::Threads);
                 }
@@ -1178,6 +1187,30 @@ impl Workbench {
                 self.debug_stop();
             }
             _ => {}
+        }
+    }
+
+    /// Shows a stop: the thread's call stack, the threads, and the Run and Debug view the
+    /// first time.
+    fn debug_show_stop(&mut self, stopped: dap::Stopped) {
+        let Some(s) = self.debug.session.as_mut() else { return };
+        s.state = State::Stopped;
+        s.generation += 1;
+        s.thread = stopped.thread.or(s.thread);
+        s.stopped = Some(stopped);
+        s.frames.clear();
+        s.frame = None;
+        s.scopes.clear();
+        s.children.clear();
+        s.send("threads", Value::Null, Pending::Threads);
+        if let Some(t) = s.thread {
+            s.send("stackTrace", json!({ "threadId": t, "startFrame": 0, "levels": 100 }), Pending::StackTrace(t));
+        }
+        // The Run and Debug view opens on the first stop (`debug.openDebug`).
+        if !s.stopped_once {
+            s.stopped_once = true;
+            self.view = View::Debug;
+            self.sidebar_visible = true;
         }
     }
 
@@ -1331,6 +1364,12 @@ impl Workbench {
         let Some(thread) = s.thread else { return };
         s.send(command, json!({ "threadId": thread }), Pending::Other);
         s.resumed();
+        // Continuing one thread shows the next one still stopped (a step stays on its thread).
+        if command == "continue" {
+            if let Some(next) = s.waiting.pop() {
+                self.debug_show_stop(next);
+            }
+        }
     }
 
     pub(super) fn debug_continue(&mut self) {

@@ -1,11 +1,19 @@
 //! The debug adapter: DAP requests from the editor become inspector (CDP) calls, inspector
 //! events become DAP events. One thread handles everything in order; a CDP call waits for its
 //! answer and queues whatever else arrives meanwhile.
+//!
+//! Each JavaScript thread is a target with its own inspector session and a DAP thread id: the
+//! launched (or attached) process is thread 1; child processes it starts (when they run Node.js)
+//! and worker threads are added as they appear. Child processes find us through a preload script
+//! (`NODE_OPTIONS=--require`, `BOOT`): it opens their inspector, writes its address into a folder
+//! we watch and waits until we've attached. Workers come through their process's session
+//! (`NodeWorker` domain, messages wrapped in `NodeWorker.sendMessageToWorker`).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,17 +27,52 @@ use crate::ws;
 
 /// How long a CDP call or the inspector's start may take.
 const TIMEOUT: Duration = Duration::from_secs(15);
-/// Node runs JavaScript on one thread; workers aren't debugged.
-const THREAD_ID: i64 = 1;
+/// The launched or attached process's thread.
+const MAIN: i64 = 1;
+/// Frame ids: thread `t`'s frame `i` is `(t - 1) * FRAMES + i + 1`.
+const FRAMES: i64 = 100_000;
+
+/// Run in every Node.js process the program starts (not the program itself, whose inspector is
+/// already open, and not in workers): opens the inspector, tells the adapter where it listens
+/// (a file in `ORBVANE_JSDEBUG_DIR`, written whole then renamed) and waits for it to attach.
+const BOOT: &str = r#"// Lets the Orbvane debugger attach to this Node.js process before it runs.
+(() => {
+  const dir = process.env.ORBVANE_JSDEBUG_DIR;
+  let inspector, isMain;
+  try {
+    inspector = require('inspector');
+    isMain = require('worker_threads').isMainThread;
+  } catch {
+    return;
+  }
+  if (!dir || !isMain || inspector.url()) return;
+  const fs = require('fs'), path = require('path');
+  try {
+    inspector.open(0, '127.0.0.1', false);
+    const title = path.basename(process.argv[1] || process.argv0 || 'node');
+    const file = path.join(dir, process.pid + '.json');
+    fs.writeFileSync(file + '.tmp', JSON.stringify({ url: inspector.url(), pid: process.pid, title }));
+    fs.renameSync(file + '.tmp', file);
+  } catch {
+    // The debugging session is over: run without it.
+    try { inspector.close(); } catch {}
+    return;
+  }
+  inspector.waitForDebugger();
+})();
+"#;
 
 enum Input {
     Dap(Value),
     DapClosed,
-    Cdp(Value),
-    CdpClosed,
+    /// A message from target `t`'s inspector.
+    Cdp(i64, Value),
+    CdpClosed(i64),
     /// A line the program wrote ("stdout" or "stderr").
     Output(&'static str, String),
     Exited(Option<i32>),
+    /// A child process waiting for us: its inspector's address, pid and script name.
+    Child { url: String, pid: u64, title: String },
 }
 
 struct Script {
@@ -57,6 +100,49 @@ enum Handle {
     Object(String),
 }
 
+/// How a target's inspector is reached.
+enum Conn {
+    Ws(ws::Writer),
+    /// A worker: through its parent's session.
+    Worker { parent: i64, session: String },
+}
+
+/// A JavaScript thread being debugged (a DAP thread).
+struct Target {
+    name: String,
+    conn: Option<Conn>,
+    scripts: HashMap<String, Script>,
+    /// The inspector's breakpoint ids for each file's breakpoints.
+    cdp_bps: HashMap<PathBuf, Vec<String>>,
+    /// The call frames of the current pause.
+    frames: Vec<Value>,
+    paused: Option<Value>,
+    /// The reason to report for the next pause (a step, a pause request).
+    expect: Option<&'static str>,
+    /// The program's first pause (`--inspect-brk`) is still to come.
+    entry_pending: bool,
+    main_context: Option<i64>,
+    /// A process (not a worker) that keeps running until we let go once its code is done.
+    process: bool,
+}
+
+impl Target {
+    fn new(name: String, conn: Conn, process: bool) -> Target {
+        Target {
+            name,
+            conn: Some(conn),
+            scripts: HashMap::new(),
+            cdp_bps: HashMap::new(),
+            frames: Vec::new(),
+            paused: None,
+            expect: None,
+            entry_pending: false,
+            main_context: None,
+            process,
+        }
+    }
+}
+
 struct Adapter {
     tx: Sender<Value>,
     seq: i64,
@@ -64,34 +150,33 @@ struct Adapter {
     input_tx: Sender<Input>,
     /// Inputs that arrived while a CDP call waited.
     queue: VecDeque<Input>,
-    ws: Option<ws::Writer>,
     cdp_id: i64,
+    targets: BTreeMap<i64, Target>,
+    next_thread: i64,
+    /// Workers' sessions, to their targets.
+    workers: HashMap<String, i64>,
     /// The program we launched (None when attached).
     child: Option<Arc<Mutex<Child>>>,
-    thread_name: String,
+    /// Where child processes say they're waiting, and the flag that stops watching it.
+    child_dir: Option<(PathBuf, Arc<AtomicBool>)>,
+    auto_attach: bool,
     no_debug: bool,
     stop_on_entry: bool,
     source_maps: bool,
     /// `"outputCapture": "std"`: the program's stdout/stderr instead of console calls.
     capture_std: bool,
     blackbox: Vec<String>,
-    scripts: HashMap<String, Script>,
+    /// Pause on exceptions: "none", "uncaught" or "all".
+    exceptions: &'static str,
     /// Breakpoints the editor wants, by file.
     desired: HashMap<PathBuf, Vec<Bp>>,
-    /// The inspector's breakpoint ids for each file's breakpoints.
-    cdp_bps: HashMap<PathBuf, Vec<String>>,
     next_bp: i64,
-    /// The call frames of the current pause.
-    frames: Vec<Value>,
-    paused: Option<Value>,
-    handles: Vec<Handle>,
-    /// Script ids behind `sourceReference`s.
-    source_refs: Vec<String>,
-    /// The reason to report for the next pause (a step, a pause request).
-    expect: Option<&'static str>,
-    /// The program's first pause (`--inspect-brk`) is still to come.
-    entry_pending: bool,
-    main_context: Option<i64>,
+    /// `variablesReference`s and `sourceReference`s, with their targets.
+    handles: HashMap<i64, (i64, Handle)>,
+    source_refs: HashMap<i64, (i64, String)>,
+    next_ref: i64,
+    /// The thread that stopped last (evaluations without a frame go there).
+    last_stopped: i64,
     terminated: bool,
 }
 
@@ -113,30 +198,55 @@ pub fn serve(rx: Receiver<Value>, tx: Sender<Value>) {
         inputs,
         input_tx,
         queue: VecDeque::new(),
-        ws: None,
         cdp_id: 0,
+        targets: BTreeMap::new(),
+        next_thread: MAIN,
+        workers: HashMap::new(),
         child: None,
-        thread_name: "Main Thread".into(),
+        child_dir: None,
+        auto_attach: true,
         no_debug: false,
         stop_on_entry: false,
         source_maps: true,
         capture_std: false,
         blackbox: Vec::new(),
-        scripts: HashMap::new(),
+        exceptions: "none",
         desired: HashMap::new(),
-        cdp_bps: HashMap::new(),
         next_bp: 0,
-        frames: Vec::new(),
-        paused: None,
-        handles: Vec::new(),
-        source_refs: Vec::new(),
-        expect: None,
-        entry_pending: false,
-        main_context: None,
+        handles: HashMap::new(),
+        source_refs: HashMap::new(),
+        next_ref: 0,
+        last_stopped: MAIN,
         terminated: false,
     };
     a.run();
     a.shutdown();
+}
+
+/// Watches `dir` for child processes' addresses until `stop` is set.
+fn watch_children(dir: PathBuf, stop: Arc<AtomicBool>, tx: Sender<Input>) {
+    thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.extension().is_none_or(|e| e != "json") {
+                    continue;
+                }
+                let info: Option<Value> = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str(&t).ok());
+                let _ = std::fs::remove_file(&path);
+                let Some(info) = info else { continue };
+                let child = Input::Child {
+                    url: info["url"].as_str().unwrap_or("").to_string(),
+                    pid: info["pid"].as_u64().unwrap_or(0),
+                    title: info["title"].as_str().unwrap_or("node").to_string(),
+                };
+                if tx.send(child).is_err() {
+                    return;
+                }
+            }
+            thread::sleep(Duration::from_millis(30));
+        }
+    });
 }
 
 fn capabilities() -> Value {
@@ -297,7 +407,7 @@ impl Adapter {
             let input = match self.queue.pop_front() {
                 Some(i) => i,
                 None => match self.inputs.recv() {
-                    Ok(i) => i,
+                    Ok(i) => self.translate(i),
                     Err(_) => return,
                 },
             };
@@ -309,20 +419,38 @@ impl Adapter {
                 }
                 Input::Dap(_) => {}
                 Input::DapClosed => return,
-                Input::Cdp(msg) => {
+                Input::Cdp(t, msg) => {
                     if let Some(method) = msg["method"].as_str() {
-                        self.cdp_event(method, &msg["params"]);
+                        self.cdp_event(t, method, &msg["params"]);
                     }
                 }
-                Input::CdpClosed => {
-                    self.ws = None;
-                    if self.child.is_none() {
-                        self.terminate_session(None);
-                    }
-                }
+                Input::CdpClosed(t) => self.target_gone(t),
                 Input::Output(category, line) => self.program_output(category, line),
                 Input::Exited(code) => self.terminate_session(Some(code.unwrap_or(0))),
+                Input::Child { url, pid, title } => self.attach_child(&url, pid, &title),
             }
+        }
+    }
+
+    /// Unwraps workers' messages, which arrive as events of their parent's session.
+    fn translate(&self, mut input: Input) -> Input {
+        loop {
+            let Input::Cdp(_, msg) = &input else { return input };
+            let worker = |m: &Value| m["params"]["sessionId"].as_str().and_then(|s| self.workers.get(s)).copied();
+            input = match msg["method"].as_str() {
+                Some("NodeWorker.receivedMessageFromWorker") => {
+                    let Some(w) = worker(msg) else { return input };
+                    match msg["params"]["message"].as_str().and_then(|m| serde_json::from_str(m).ok()) {
+                        Some(inner) => Input::Cdp(w, inner),
+                        None => return input,
+                    }
+                }
+                Some("NodeWorker.detachedFromWorker") => match worker(msg) {
+                    Some(w) => Input::CdpClosed(w),
+                    None => return input,
+                },
+                _ => return input,
+            };
         }
     }
 
@@ -342,10 +470,15 @@ impl Adapter {
         self.event("output", json!({ "category": category, "output": text }));
     }
 
+    fn thread_of(args: &Value) -> i64 {
+        args["threadId"].as_i64().unwrap_or(MAIN)
+    }
+
     /// Handles a request; false when the session is over.
     fn request(&mut self, msg: &Value) -> bool {
         let command = msg["command"].as_str().unwrap_or("").to_string();
         let args = &msg["arguments"];
+        let t = Self::thread_of(args);
         let result = match command.as_str() {
             "initialize" => Ok(capabilities()),
             "launch" => self.launch(args),
@@ -353,20 +486,25 @@ impl Adapter {
             "setBreakpoints" => self.set_breakpoints(args),
             "setExceptionBreakpoints" => self.set_exception_breakpoints(args),
             "configurationDone" => self.configuration_done(),
-            "threads" => Ok(json!({ "threads": [{ "id": THREAD_ID, "name": self.thread_name }] })),
-            "stackTrace" => Ok(self.stack_trace()),
+            "threads" => {
+                let threads: Vec<Value> = self.targets.iter().map(|(id, t)| json!({ "id": id, "name": t.name })).collect();
+                Ok(json!({ "threads": threads }))
+            }
+            "stackTrace" => Ok(self.stack_trace(t)),
             "scopes" => self.scopes(args),
             "variables" => self.variables(args),
             "evaluate" => self.evaluate(args),
-            "continue" => self.call("Debugger.resume", json!({})).map(|_| json!({ "allThreadsContinued": true })),
-            "next" => self.step("Debugger.stepOver"),
-            "stepIn" => self.step("Debugger.stepInto"),
-            "stepOut" => self.step("Debugger.stepOut"),
+            "continue" => self.call(t, "Debugger.resume", json!({})).map(|_| json!({ "allThreadsContinued": self.targets.len() == 1 })),
+            "next" => self.step(t, "Debugger.stepOver"),
+            "stepIn" => self.step(t, "Debugger.stepInto"),
+            "stepOut" => self.step(t, "Debugger.stepOut"),
             "pause" => {
-                self.expect = Some("pause");
-                self.call("Debugger.pause", json!({})).map(|_| Value::Null)
+                if let Some(target) = self.targets.get_mut(&t) {
+                    target.expect = Some("pause");
+                }
+                self.call(t, "Debugger.pause", json!({})).map(|_| Value::Null)
             }
-            "exceptionInfo" => self.exception_info(),
+            "exceptionInfo" => self.exception_info(t),
             "source" => self.source(args),
             "terminate" => {
                 self.kill();
@@ -400,41 +538,58 @@ impl Adapter {
 
     // ------------------------------------------------------------ CDP
 
-    /// Sends a CDP command and waits for its answer, queueing everything else.
-    fn call(&mut self, method: &str, params: Value) -> Result<Value, String> {
-        let Some(ws) = &self.ws else { return Err("Not connected to a debuggee.".into()) };
+    /// Sends a message to target `t`'s inspector (a worker's through its parent).
+    fn send_to(&mut self, t: i64, msg: Value) -> Result<(), String> {
+        match self.targets.get(&t).and_then(|t| t.conn.as_ref()) {
+            Some(Conn::Ws(w)) => w.send(&msg.to_string()).map_err(|e| e.to_string()),
+            Some(Conn::Worker { parent, session }) => {
+                let (parent, session) = (*parent, session.clone());
+                self.cdp_id += 1;
+                let wrapped = json!({ "id": self.cdp_id, "method": "NodeWorker.sendMessageToWorker", "params": { "sessionId": session, "message": msg.to_string() } });
+                self.send_to(parent, wrapped)
+            }
+            None => Err("Not connected to a debuggee.".into()),
+        }
+    }
+
+    /// Sends a CDP command to target `t` and waits for its answer, queueing everything else.
+    fn call(&mut self, t: i64, method: &str, params: Value) -> Result<Value, String> {
         self.cdp_id += 1;
         let id = self.cdp_id;
-        ws.send(&json!({ "id": id, "method": method, "params": params }).to_string()).map_err(|e| e.to_string())?;
+        self.send_to(t, json!({ "id": id, "method": method, "params": params }))?;
         let deadline = Instant::now() + TIMEOUT;
         loop {
-            match self.inputs.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(Input::Cdp(m)) if m["id"].as_i64() == Some(id) => {
+            let input = match self.inputs.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
+                Ok(i) => self.translate(i),
+                Err(_) => return Err(format!("{method} timed out")),
+            };
+            match input {
+                Input::Cdp(from, m) if from == t && m["id"].as_i64() == Some(id) => {
                     return match m.get("error") {
                         Some(e) => Err(e["message"].as_str().unwrap_or("error").to_string()),
                         None => Ok(m["result"].clone()),
                     };
                 }
-                Ok(Input::CdpClosed) => {
-                    self.queue.push_back(Input::CdpClosed);
+                Input::CdpClosed(from) if from == t => {
+                    self.queue.push_back(Input::CdpClosed(from));
                     return Err("The debuggee disconnected.".into());
                 }
-                Ok(other) => self.queue.push_back(other),
-                Err(_) => return Err(format!("{method} timed out")),
+                other => self.queue.push_back(other),
             }
         }
     }
 
     /// Sends a CDP command without waiting.
-    fn notify(&mut self, method: &str, params: Value) {
-        if let Some(ws) = &self.ws {
-            self.cdp_id += 1;
-            let _ = ws.send(&json!({ "id": self.cdp_id, "method": method, "params": params }).to_string());
-        }
+    fn notify(&mut self, t: i64, method: &str, params: Value) {
+        self.cdp_id += 1;
+        let _ = self.send_to(t, json!({ "id": self.cdp_id, "method": method, "params": params }));
     }
 
-    fn connect(&mut self, url: &str) -> Result<(), String> {
+    /// Connects to the inspector at `url` as a new thread; its id.
+    fn connect(&mut self, url: &str, name: String) -> Result<i64, String> {
         let (writer, mut reader) = ws::connect(url).map_err(|e| format!("Couldn't connect to the debuggee at {url}: {e}"))?;
+        let t = self.next_thread;
+        self.next_thread += 1;
         let tx = self.input_tx.clone();
         // ORBVANE_CDP_LOG=<file> records what the inspector sends.
         let log = std::env::var_os("ORBVANE_CDP_LOG").and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok());
@@ -443,29 +598,83 @@ impl Adapter {
             while let Some(text) = reader.next() {
                 if let Some(f) = &mut log {
                     use std::io::Write;
-                    let _ = writeln!(f, "<- {text}");
+                    let _ = writeln!(f, "<- [{t}] {text}");
                 }
                 if let Ok(msg) = serde_json::from_str(&text) {
-                    if tx.send(Input::Cdp(msg)).is_err() {
+                    if tx.send(Input::Cdp(t, msg)).is_err() {
                         return;
                     }
                 }
             }
-            let _ = tx.send(Input::CdpClosed);
+            let _ = tx.send(Input::CdpClosed(t));
         });
-        self.ws = Some(writer);
-        self.call("Runtime.enable", json!({}))?;
-        self.call("Debugger.enable", json!({}))?;
+        self.targets.insert(t, Target::new(name, Conn::Ws(writer), true));
+        Ok(t)
+    }
+
+    /// Readies a new target: domains, options and the breakpoints set so far.
+    fn setup(&mut self, t: i64) -> Result<(), String> {
+        self.call(t, "Runtime.enable", json!({}))?;
+        self.call(t, "Debugger.enable", json!({}))?;
         if !self.blackbox.is_empty() {
-            let _ = self.call("Debugger.setBlackboxPatterns", json!({ "patterns": self.blackbox }));
+            let _ = self.call(t, "Debugger.setBlackboxPatterns", json!({ "patterns": self.blackbox }));
         }
         if self.source_maps {
             // Each script with a source map pauses before it runs, so breakpoints in its
             // sources can be set first.
-            let _ = self.call("Debugger.setInstrumentationBreakpoint", json!({ "instrumentation": "beforeScriptWithSourceMapExecution" }));
+            let _ = self.call(t, "Debugger.setInstrumentationBreakpoint", json!({ "instrumentation": "beforeScriptWithSourceMapExecution" }));
         }
-        let _ = self.call("Debugger.setAsyncCallStackDepth", json!({ "maxDepth": 32 }));
+        let _ = self.call(t, "Debugger.setAsyncCallStackDepth", json!({ "maxDepth": 32 }));
+        if self.exceptions != "none" {
+            let _ = self.call(t, "Debugger.setPauseOnExceptions", json!({ "state": self.exceptions }));
+        }
+        let files: Vec<PathBuf> = self.desired.keys().cloned().collect();
+        for file in files {
+            self.apply_breakpoints(t, &file);
+        }
+        if self.auto_attach {
+            let _ = self.call(t, "NodeWorker.enable", json!({ "waitForDebuggerOnStart": true }));
+        }
         Ok(())
+    }
+
+    /// A target that waits for us (a child process or worker) is ready: it runs.
+    fn start_thread(&mut self, t: i64) {
+        self.event("thread", json!({ "reason": "started", "threadId": t }));
+        if let Err(e) = self.setup(t) {
+            self.output("console", format!("Couldn't debug {}: {e}\n", self.targets.get(&t).map_or("a thread", |t| t.name.as_str())));
+        }
+        self.notify(t, "Runtime.runIfWaitingForDebugger", json!({}));
+    }
+
+    fn attach_child(&mut self, url: &str, pid: u64, title: &str) {
+        match self.connect(url, format!("{title} [{pid}]")) {
+            Ok(t) => self.start_thread(t),
+            Err(e) => self.output("console", format!("{e}\n")),
+        }
+    }
+
+    /// Target `t`'s inspector went away (and the workers it had).
+    fn target_gone(&mut self, t: i64) {
+        if t == MAIN {
+            if let Some(target) = self.targets.get_mut(&MAIN) {
+                target.conn = None;
+            }
+            if self.child.is_none() {
+                self.terminate_session(None);
+            }
+            return;
+        }
+        if self.targets.remove(&t).is_none() {
+            return;
+        }
+        self.workers.retain(|_, w| *w != t);
+        self.handles.retain(|_, (owner, _)| *owner != t);
+        self.event("thread", json!({ "reason": "exited", "threadId": t }));
+        let orphans: Vec<i64> = self.targets.iter().filter(|(_, x)| matches!(x.conn, Some(Conn::Worker { parent, .. }) if parent == t)).map(|(id, _)| *id).collect();
+        for w in orphans {
+            self.target_gone(w);
+        }
     }
 
     // ------------------------------------------------------------ launch and attach
@@ -474,9 +683,25 @@ impl Adapter {
         self.stop_on_entry = args["stopOnEntry"].as_bool().unwrap_or(false);
         self.source_maps = args["sourceMaps"].as_bool().unwrap_or(true);
         self.capture_std = args["outputCapture"] == "std";
+        self.auto_attach = args["autoAttachChildProcesses"].as_bool().unwrap_or(true);
         // Negations (`!**/node_modules/mine/**`) aren't supported: those files aren't skipped.
         let globs = args["skipFiles"].as_array().map(|a| a.iter().filter_map(|g| g.as_str()).filter(|g| !g.starts_with('!')).collect::<Vec<_>>()).unwrap_or_default();
         self.blackbox = globs.into_iter().map(blackbox_pattern).collect();
+    }
+
+    /// Makes Node.js processes the program starts report to us: the preload script in a
+    /// fresh folder, watched for their addresses. Returns the `NODE_OPTIONS` to add.
+    fn watch_child_processes(&mut self) -> Option<String> {
+        static SESSIONS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SESSIONS.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("orbvane-jsdebug-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).ok()?;
+        let boot = dir.join("boot.js");
+        std::fs::write(&boot, BOOT).ok()?;
+        let stop = Arc::new(AtomicBool::new(false));
+        watch_children(dir.clone(), stop.clone(), self.input_tx.clone());
+        self.child_dir = Some((dir, stop));
+        Some(format!("--require \"{}\"", boot.display()))
     }
 
     fn launch(&mut self, args: &Value) -> Result<Value, String> {
@@ -510,8 +735,15 @@ impl Adapter {
                 };
             }
         }
+        if !self.no_debug && self.auto_attach {
+            if let Some(require) = self.watch_child_processes() {
+                let theirs = args["env"]["NODE_OPTIONS"].as_str().map(String::from).or_else(|| std::env::var("NODE_OPTIONS").ok()).unwrap_or_default();
+                cmd.env("NODE_OPTIONS", format!("{theirs} {require}").trim());
+                cmd.env("ORBVANE_JSDEBUG_DIR", &self.child_dir.as_ref().unwrap().0);
+            }
+        }
         let mut child = cmd.spawn().map_err(|e| format!("Can't launch program '{}': {e}", program.unwrap_or(runtime)))?;
-        self.thread_name = program.and_then(|p| Path::new(p).file_name()).map_or("Main Thread".into(), |n| format!("{} [{}]", n.to_string_lossy(), child.id()));
+        let name = program.and_then(|p| Path::new(p).file_name()).map_or("Main Thread".into(), |n| format!("{} [{}]", n.to_string_lossy(), child.id()));
         for (stream, category) in [(child.stdout.take().map(|s| Box::new(s) as Box<dyn Read + Send>), "stdout"), (child.stderr.take().map(|s| Box::new(s) as Box<dyn Read + Send>), "stderr")] {
             let Some(stream) = stream else { continue };
             let tx = self.input_tx.clone();
@@ -565,7 +797,8 @@ impl Adapter {
                 }
             }
         };
-        self.connect(&url)?;
+        let t = self.connect(&url, name)?;
+        self.setup(t)?;
         Ok(Value::Null)
     }
 
@@ -582,15 +815,18 @@ impl Adapter {
                 targets.as_array().and_then(|t| t.iter().find_map(|t| t["webSocketDebuggerUrl"].as_str())).ok_or(format!("No debuggable target at {host}"))?.to_string()
             }
         };
-        self.thread_name = "Attached Process".into();
-        self.connect(&url)?;
+        let t = self.connect(&url, "Attached Process".into())?;
+        self.setup(t)?;
         Ok(Value::Null)
     }
 
     fn configuration_done(&mut self) -> Result<Value, String> {
-        if self.ws.is_some() {
-            self.entry_pending = self.child.is_some();
-            self.call("Runtime.runIfWaitingForDebugger", json!({}))?;
+        if self.targets.contains_key(&MAIN) {
+            let launched = self.child.is_some();
+            if let Some(main) = self.targets.get_mut(&MAIN) {
+                main.entry_pending = launched;
+            }
+            self.call(MAIN, "Runtime.runIfWaitingForDebugger", json!({}))?;
         }
         Ok(Value::Null)
     }
@@ -601,10 +837,20 @@ impl Adapter {
         }
     }
 
-    fn shutdown(&mut self) {
-        if let Some(ws) = self.ws.take() {
-            ws.close();
+    fn close_all(&mut self) {
+        for t in self.targets.values_mut() {
+            if let Some(Conn::Ws(w)) = t.conn.take() {
+                w.close();
+            }
         }
+    }
+
+    fn shutdown(&mut self) {
+        if let Some((dir, stop)) = self.child_dir.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = std::fs::remove_dir_all(dir);
+        }
+        self.close_all();
         self.kill();
     }
 
@@ -620,10 +866,11 @@ impl Adapter {
     }
 
     fn program_output(&mut self, category: &'static str, line: String) {
-        if line.starts_with("Waiting for the debugger to disconnect") {
-            // The program is done; it exits once we let go.
-            if let Some(ws) = self.ws.take() {
-                ws.close();
+        // The program is done; it exits once we let go. (Child processes print this to the
+        // same stream: then the end of the program's main context says it instead.)
+        if line.starts_with("Waiting for the debugger to disconnect") && self.child_dir.is_none() {
+            if let Some(Conn::Ws(w)) = self.targets.get_mut(&MAIN).and_then(|t| t.conn.take()) {
+                w.close();
             }
         }
         if inspector_chatter(&line) || !self.capture_std {
@@ -634,9 +881,9 @@ impl Adapter {
 
     // ------------------------------------------------------------ scripts and breakpoints
 
-    /// The script's source map, loaded on first use.
-    fn source_map(&mut self, script_id: &str) -> Option<Arc<SourceMap>> {
-        let script = self.scripts.get_mut(script_id)?;
+    /// A script's source map, loaded on first use.
+    fn source_map(&mut self, t: i64, script_id: &str) -> Option<Arc<SourceMap>> {
+        let script = self.targets.get_mut(&t)?.scripts.get_mut(script_id)?;
         if script.map.is_none() {
             let map = (|| {
                 let url = &script.map_url;
@@ -663,20 +910,21 @@ impl Adapter {
     }
 
     /// Where a generated position is for the user: (DAP source, line, column), 0-based.
-    fn locate(&mut self, script_id: &str, line: u32, col: u32) -> (Value, u32, u32) {
-        if let Some(map) = self.source_map(script_id) {
+    fn locate(&mut self, t: i64, script_id: &str, line: u32, col: u32) -> (Value, u32, u32) {
+        if let Some(map) = self.source_map(t, script_id) {
             if let Some((path, l, c)) = map.original(line, col) {
                 let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 return (json!({ "name": name, "path": path }), l, c);
             }
         }
-        let Some(script) = self.scripts.get(script_id) else { return (Value::Null, line, col) };
+        let Some(script) = self.targets.get(&t).and_then(|x| x.scripts.get(script_id)) else { return (Value::Null, line, col) };
         match &script.path {
             Some(path) => (json!({ "name": path.file_name().map(|n| n.to_string_lossy().into_owned()), "path": path }), line, col),
             None => {
                 let url = script.url.clone();
-                self.source_refs.push(script_id.to_string());
-                (json!({ "name": url, "sourceReference": self.source_refs.len(), "presentationHint": "deemphasize" }), line, col)
+                self.next_ref += 1;
+                self.source_refs.insert(self.next_ref, (t, script_id.to_string()));
+                (json!({ "name": url, "sourceReference": self.next_ref, "presentationHint": "deemphasize" }), line, col)
             }
         }
     }
@@ -700,27 +948,43 @@ impl Adapter {
             })
             .unwrap_or_default();
         self.desired.insert(path.clone(), wanted);
-        let results = self.apply_breakpoints(&path);
+        // Every thread gets them; one that binds them makes them verified.
+        let threads: Vec<i64> = self.targets.keys().copied().collect();
+        let mut results = self.unbound(&path);
+        for t in threads {
+            for (r, new) in results.iter_mut().zip(self.apply_breakpoints(t, &path)) {
+                if new["verified"] == true && r["verified"] != true {
+                    *r = new;
+                }
+            }
+        }
         Ok(json!({ "breakpoints": results }))
     }
 
-    /// (Re)sets a file's breakpoints in the inspector; their DAP state.
-    fn apply_breakpoints(&mut self, path: &Path) -> Vec<Value> {
-        for id in self.cdp_bps.remove(path).unwrap_or_default() {
-            let _ = self.call("Debugger.removeBreakpoint", json!({ "breakpointId": id }));
+    /// A file's breakpoints as not bound yet.
+    fn unbound(&self, path: &Path) -> Vec<Value> {
+        let wanted = self.desired.get(path).cloned().unwrap_or_default();
+        wanted.iter().map(|b| json!({ "id": b.id, "verified": false, "line": b.line + 1, "message": "Unbound breakpoint" })).collect()
+    }
+
+    /// (Re)sets a file's breakpoints in target `t`; their DAP state.
+    fn apply_breakpoints(&mut self, t: i64, path: &Path) -> Vec<Value> {
+        let old = self.targets.get_mut(&t).and_then(|x| x.cdp_bps.remove(path)).unwrap_or_default();
+        for id in old {
+            let _ = self.call(t, "Debugger.removeBreakpoint", json!({ "breakpointId": id }));
         }
         let wanted = self.desired.get(path).cloned().unwrap_or_default();
-        if self.ws.is_none() {
-            return wanted.iter().map(|b| json!({ "id": b.id, "verified": false, "line": b.line + 1 })).collect();
+        if self.targets.get(&t).is_none_or(|x| x.conn.is_none()) {
+            return self.unbound(path);
         }
         let is_js = path.extension().is_some_and(|e| matches!(e.to_str(), Some("js" | "mjs" | "cjs")));
         // Scripts generated from this file.
         let mut mapped = Vec::new();
         if self.source_maps {
-            let ids: Vec<String> = self.scripts.iter().filter(|(_, s)| !s.map_url.is_empty()).map(|(id, _)| id.clone()).collect();
+            let ids: Vec<String> = self.targets[&t].scripts.iter().filter(|(_, s)| !s.map_url.is_empty()).map(|(id, _)| id.clone()).collect();
             for id in ids {
-                if let Some(map) = self.source_map(&id).filter(|m| m.has_source(path)) {
-                    mapped.push((self.scripts[&id].url.clone(), map));
+                if let Some(map) = self.source_map(t, &id).filter(|m| m.has_source(path)) {
+                    mapped.push((self.targets[&t].scripts[&id].url.clone(), map));
                 }
             }
         }
@@ -733,7 +997,7 @@ impl Adapter {
                 for (url, map) in &mapped {
                     let Some((gl, gc)) = map.generated(path, bp.line) else { continue };
                     let params = json!({ "url": url, "lineNumber": gl, "columnNumber": gc, "condition": bp.condition });
-                    if let Ok(r) = self.call("Debugger.setBreakpointByUrl", params) {
+                    if let Ok(r) = self.call(t, "Debugger.setBreakpointByUrl", params) {
                         ids.extend(r["breakpointId"].as_str().map(String::from));
                         verified = true;
                     }
@@ -743,7 +1007,7 @@ impl Adapter {
                 if let Some(c) = bp.column {
                     params["columnNumber"] = json!(c);
                 }
-                if let Ok(r) = self.call("Debugger.setBreakpointByUrl", params) {
+                if let Ok(r) = self.call(t, "Debugger.setBreakpointByUrl", params) {
                     ids.extend(r["breakpointId"].as_str().map(String::from));
                     if let Some(l) = r["locations"][0]["lineNumber"].as_u64() {
                         line = l as u32;
@@ -758,55 +1022,77 @@ impl Adapter {
             }
             results.push(result);
         }
-        self.cdp_bps.insert(path.to_path_buf(), ids);
+        if let Some(x) = self.targets.get_mut(&t) {
+            x.cdp_bps.insert(path.to_path_buf(), ids);
+        }
         results
     }
 
     fn set_exception_breakpoints(&mut self, args: &Value) -> Result<Value, String> {
         let filters: Vec<&str> = args["filters"].as_array().map(|a| a.iter().filter_map(Value::as_str).collect()).unwrap_or_default();
-        let state = if filters.contains(&"all") {
+        self.exceptions = if filters.contains(&"all") {
             "all"
         } else if filters.contains(&"uncaught") {
             "uncaught"
         } else {
             "none"
         };
-        if self.ws.is_some() {
-            self.call("Debugger.setPauseOnExceptions", json!({ "state": state }))?;
+        let threads: Vec<i64> = self.targets.keys().copied().collect();
+        for t in threads {
+            self.call(t, "Debugger.setPauseOnExceptions", json!({ "state": self.exceptions }))?;
         }
         Ok(Value::Null)
     }
 
     // ------------------------------------------------------------ pauses
 
-    fn cdp_event(&mut self, method: &str, params: &Value) {
+    fn cdp_event(&mut self, t: i64, method: &str, params: &Value) {
         match method {
             "Debugger.scriptParsed" => {
                 let url = params["url"].as_str().unwrap_or("").to_string();
                 let script = Script { path: crate::path_of_url(&url), url, map_url: params["sourceMapURL"].as_str().unwrap_or("").to_string(), map: None };
-                self.scripts.insert(params["scriptId"].as_str().unwrap_or("").to_string(), script);
+                if let Some(x) = self.targets.get_mut(&t) {
+                    x.scripts.insert(params["scriptId"].as_str().unwrap_or("").to_string(), script);
+                }
             }
-            "Debugger.paused" => self.paused(params),
+            "Debugger.paused" => self.paused(t, params),
             "Debugger.resumed" => {
-                let was_paused = self.paused.take().is_some();
-                self.frames.clear();
-                self.handles.clear();
+                let Some(x) = self.targets.get_mut(&t) else { return };
+                let was_paused = x.paused.take().is_some();
+                x.frames.clear();
+                self.handles.retain(|_, (owner, _)| *owner != t);
                 if was_paused {
-                    self.event("continued", json!({ "threadId": THREAD_ID, "allThreadsContinued": true }));
+                    self.event("continued", json!({ "threadId": t, "allThreadsContinued": self.targets.len() == 1 }));
                 }
             }
             "Runtime.executionContextCreated" => {
-                if self.main_context.is_none() {
-                    self.main_context = params["context"]["id"].as_i64();
+                if let Some(x) = self.targets.get_mut(&t).filter(|x| x.main_context.is_none()) {
+                    x.main_context = params["context"]["id"].as_i64();
                 }
             }
             "Runtime.executionContextDestroyed" => {
-                // The program is done (it waits for us to let go).
-                if self.child.is_some() && params["executionContextId"].as_i64() == self.main_context {
-                    if let Some(ws) = self.ws.take() {
-                        ws.close();
+                // A process is done (it waits for us to let go).
+                let launched = t != MAIN || self.child.is_some();
+                if let Some(x) = self.targets.get_mut(&t).filter(|x| x.process && launched && params["executionContextId"].as_i64() == x.main_context) {
+                    if let Some(Conn::Ws(w)) = x.conn.take() {
+                        w.close();
                     }
                 }
+            }
+            "NodeWorker.attachedToWorker" => {
+                let Some(session) = params["sessionId"].as_str().map(String::from) else { return };
+                let info = &params["workerInfo"];
+                let title = info["title"].as_str().filter(|s| !s.is_empty()).or(info["url"].as_str()).unwrap_or("worker");
+                let title = title.rsplit('/').next().unwrap_or(title);
+                let w = self.next_thread;
+                self.next_thread += 1;
+                let name = format!("Worker {} ({title})", info["workerId"].as_str().unwrap_or(""));
+                let mut target = Target::new(name, Conn::Worker { parent: t, session: session.clone() }, false);
+                // A worker that waited for us stops at its first line, like `--inspect-brk`.
+                target.entry_pending = params["waitingForDebugger"].as_bool().unwrap_or(true);
+                self.targets.insert(w, target);
+                self.workers.insert(session, w);
+                self.start_thread(w);
             }
             "Runtime.consoleAPICalled" if !self.capture_std => {
                 let args = params["args"].as_array().cloned().unwrap_or_default();
@@ -826,29 +1112,32 @@ impl Adapter {
         }
     }
 
-    fn paused(&mut self, params: &Value) {
+    fn paused(&mut self, t: i64, params: &Value) {
         let reason = params["reason"].as_str().unwrap_or("");
         if reason == "instrumentation" {
             // A script with a source map is about to run: bind breakpoints in its sources.
-            self.bind_mapped(params["data"]["scriptId"].as_str().unwrap_or(""));
-            self.notify("Debugger.resume", json!({}));
+            self.bind_mapped(t, params["data"]["scriptId"].as_str().unwrap_or(""));
+            self.notify(t, "Debugger.resume", json!({}));
             return;
         }
-        if self.entry_pending {
+        let Some(entry_pending) = self.targets.get(&t).map(|x| x.entry_pending) else { return };
+        if entry_pending {
             // `--inspect-brk` stops in the main script instead of the instrumentation pause.
             if let Some(script) = params["callFrames"][0]["location"]["scriptId"].as_str() {
-                self.bind_mapped(script);
+                self.bind_mapped(t, script);
             }
         }
-        self.frames = params["callFrames"].as_array().cloned().unwrap_or_default();
-        self.handles.clear();
-        self.source_refs.clear();
+        self.handles.retain(|_, (owner, _)| *owner != t);
+        self.source_refs.retain(|_, (owner, _)| *owner != t);
+        let stop_on_entry = self.stop_on_entry;
+        let x = self.targets.get_mut(&t).unwrap();
+        x.frames = params["callFrames"].as_array().cloned().unwrap_or_default();
         let hit = params["hitBreakpoints"].as_array().is_some_and(|h| !h.is_empty());
         let exception = matches!(reason, "exception" | "promiseRejection");
-        let dap_reason = if std::mem::take(&mut self.entry_pending) && !hit && !exception {
-            if !self.stop_on_entry {
-                self.frames.clear();
-                self.notify("Debugger.resume", json!({}));
+        let dap_reason = if std::mem::take(&mut x.entry_pending) && !hit && !exception {
+            if !stop_on_entry {
+                x.frames.clear();
+                self.notify(t, "Debugger.resume", json!({}));
                 return;
             }
             "entry"
@@ -857,11 +1146,12 @@ impl Adapter {
         } else if exception {
             "exception"
         } else {
-            self.expect.unwrap_or("pause")
+            x.expect.unwrap_or("pause")
         };
-        self.expect = None;
-        self.paused = Some(params.clone());
-        let mut body = json!({ "reason": dap_reason, "threadId": THREAD_ID, "allThreadsStopped": true });
+        x.expect = None;
+        x.paused = Some(params.clone());
+        self.last_stopped = t;
+        let mut body = json!({ "reason": dap_reason, "threadId": t, "allThreadsStopped": self.targets.len() == 1 });
         if exception {
             body["description"] = json!("Paused on exception");
             body["text"] = json!(exception_text(&json!({ "exception": params["data"] })));
@@ -869,32 +1159,34 @@ impl Adapter {
         self.event("stopped", body);
     }
 
-    /// Sets the breakpoints of the files script `script_id` was generated from, and tells the
-    /// editor they're bound now.
-    fn bind_mapped(&mut self, script_id: &str) {
-        let Some(map) = self.source_map(script_id) else { return };
+    /// Sets the breakpoints of the files script `script_id` (of target `t`) was generated
+    /// from, and tells the editor they're bound now.
+    fn bind_mapped(&mut self, t: i64, script_id: &str) {
+        let Some(map) = self.source_map(t, script_id) else { return };
         let files: Vec<PathBuf> = map.sources.iter().filter(|s| self.desired.contains_key(*s)).cloned().collect();
         for file in files {
-            for bp in self.apply_breakpoints(&file) {
+            for bp in self.apply_breakpoints(t, &file) {
                 self.event("breakpoint", json!({ "reason": "changed", "breakpoint": bp }));
             }
         }
     }
 
-    fn step(&mut self, method: &str) -> Result<Value, String> {
-        self.expect = Some("step");
-        self.call(method, json!({})).map(|_| Value::Null)
+    fn step(&mut self, t: i64, method: &str) -> Result<Value, String> {
+        if let Some(x) = self.targets.get_mut(&t) {
+            x.expect = Some("step");
+        }
+        self.call(t, method, json!({})).map(|_| Value::Null)
     }
 
-    fn stack_trace(&mut self) -> Value {
-        let frames = self.frames.clone();
+    fn stack_trace(&mut self, t: i64) -> Value {
+        let frames = self.targets.get(&t).map(|x| x.frames.clone()).unwrap_or_default();
         let mut out = Vec::new();
         for (i, f) in frames.iter().enumerate() {
             let loc = &f["location"];
             let script = loc["scriptId"].as_str().unwrap_or("");
-            let (source, line, col) = self.locate(script, loc["lineNumber"].as_u64().unwrap_or(0) as u32, loc["columnNumber"].as_u64().unwrap_or(0) as u32);
+            let (source, line, col) = self.locate(t, script, loc["lineNumber"].as_u64().unwrap_or(0) as u32, loc["columnNumber"].as_u64().unwrap_or(0) as u32);
             let name = f["functionName"].as_str().filter(|n| !n.is_empty()).unwrap_or("<anonymous>");
-            let mut frame = json!({ "id": i + 1, "name": name, "line": line + 1, "column": col + 1 });
+            let mut frame = json!({ "id": (t - 1) * FRAMES + i as i64 + 1, "name": name, "line": line + 1, "column": col + 1 });
             if !source.is_null() {
                 let internal = source["path"].is_null();
                 frame["source"] = source;
@@ -907,24 +1199,27 @@ impl Adapter {
         json!({ "stackFrames": out, "totalFrames": frames.len() })
     }
 
-    fn frame(&self, args: &Value) -> Option<&Value> {
-        let id = args["frameId"].as_u64()? as usize;
-        self.frames.get(id.checked_sub(1)?)
+    /// The frame `frameId` names: (its thread, the frame).
+    fn frame(&self, args: &Value) -> Option<(i64, &Value)> {
+        let id = args["frameId"].as_i64()?.checked_sub(1)?;
+        let t = id / FRAMES + 1;
+        Some((t, self.targets.get(&t)?.frames.get((id % FRAMES) as usize)?))
     }
 
-    fn handle(&mut self, h: Handle) -> i64 {
-        self.handles.push(h);
-        self.handles.len() as i64
+    fn handle(&mut self, t: i64, h: Handle) -> i64 {
+        self.next_ref += 1;
+        self.handles.insert(self.next_ref, (t, h));
+        self.next_ref
     }
 
     fn scopes(&mut self, args: &Value) -> Result<Value, String> {
-        let frame = self.frame(args).cloned().ok_or("Unknown frame")?;
+        let (t, frame) = self.frame(args).map(|(t, f)| (t, f.clone())).ok_or("Unknown frame")?;
         let mut out = Vec::new();
         for scope in frame["scopeChain"].as_array().cloned().unwrap_or_default() {
             let Some(object) = scope["object"]["objectId"].as_str() else { continue };
             let local = scope["type"] == "local";
             let this = local.then(|| frame["this"].clone()).filter(|t| !t.is_null() && t["type"] != "undefined");
-            let reference = self.handle(Handle::Scope { object: object.to_string(), this });
+            let reference = self.handle(t, Handle::Scope { object: object.to_string(), this });
             let mut s = json!({ "name": scope_name(&scope), "variablesReference": reference, "expensive": scope["type"] == "global" });
             if local {
                 s["presentationHint"] = json!("locals");
@@ -934,28 +1229,28 @@ impl Adapter {
         Ok(json!({ "scopes": out }))
     }
 
-    fn variable(&mut self, name: &str, value: &Value) -> Value {
-        let reference = value["objectId"].as_str().map_or(0, |id| self.handle(Handle::Object(id.to_string())));
+    fn variable(&mut self, t: i64, name: &str, value: &Value) -> Value {
+        let reference = value["objectId"].as_str().map_or(0, |id| self.handle(t, Handle::Object(id.to_string())));
         let ty = value["className"].as_str().or(value["type"].as_str()).unwrap_or("");
         json!({ "name": name, "value": format::describe(value), "type": ty, "variablesReference": reference })
     }
 
     fn variables(&mut self, args: &Value) -> Result<Value, String> {
-        let reference = args["variablesReference"].as_u64().unwrap_or(0) as usize;
-        let (object, this) = match self.handles.get(reference.wrapping_sub(1)) {
-            Some(Handle::Scope { object, this }) => (object.clone(), this.clone()),
-            Some(Handle::Object(object)) => (object.clone(), None),
+        let reference = args["variablesReference"].as_i64().unwrap_or(0);
+        let (t, object, this) = match self.handles.get(&reference) {
+            Some((t, Handle::Scope { object, this })) => (*t, object.clone(), this.clone()),
+            Some((t, Handle::Object(object))) => (*t, object.clone(), None),
             None => return Err("Unknown variables reference".into()),
         };
-        let r = self.call("Runtime.getProperties", json!({ "objectId": object, "ownProperties": true, "generatePreview": true }))?;
+        let r = self.call(t, "Runtime.getProperties", json!({ "objectId": object, "ownProperties": true, "generatePreview": true }))?;
         let mut out = Vec::new();
         if let Some(this) = this {
-            out.push(self.variable("this", &this));
+            out.push(self.variable(t, "this", &this));
         }
         for p in r["result"].as_array().cloned().unwrap_or_default() {
             let name = p["name"].as_str().unwrap_or("");
             match p.get("value") {
-                Some(v) => out.push(self.variable(name, v)),
+                Some(v) => out.push(self.variable(t, name, v)),
                 // A getter: not run just to show it.
                 None if p["get"]["type"] == "function" => out.push(json!({ "name": name, "value": "(...)", "variablesReference": 0 })),
                 None => {}
@@ -963,7 +1258,7 @@ impl Adapter {
         }
         for p in r["internalProperties"].as_array().cloned().unwrap_or_default() {
             if let Some(v) = p.get("value") {
-                out.push(self.variable(p["name"].as_str().unwrap_or(""), v));
+                out.push(self.variable(t, p["name"].as_str().unwrap_or(""), v));
             }
         }
         Ok(json!({ "variables": out }))
@@ -972,28 +1267,33 @@ impl Adapter {
     fn evaluate(&mut self, args: &Value) -> Result<Value, String> {
         let expression = args["expression"].as_str().unwrap_or("");
         let context = args["context"].as_str().unwrap_or("repl");
-        let r = match self.frame(args).map(|f| f["callFrameId"].clone()) {
-            Some(frame) => self.call(
-                "Debugger.evaluateOnCallFrame",
-                json!({
-                    "callFrameId": frame, "expression": expression, "generatePreview": true,
-                    "includeCommandLineAPI": context == "repl", "silent": context != "repl", "throwOnSideEffect": context == "hover",
-                }),
-            )?,
-            None => self.call(
-                "Runtime.evaluate",
-                json!({ "expression": expression, "generatePreview": true, "includeCommandLineAPI": true, "replMode": context == "repl", "silent": context != "repl" }),
-            )?,
+        let (t, r) = match self.frame(args).map(|(t, f)| (t, f["callFrameId"].clone())) {
+            Some((t, frame)) => (
+                t,
+                self.call(
+                    t,
+                    "Debugger.evaluateOnCallFrame",
+                    json!({
+                        "callFrameId": frame, "expression": expression, "generatePreview": true,
+                        "includeCommandLineAPI": context == "repl", "silent": context != "repl", "throwOnSideEffect": context == "hover",
+                    }),
+                )?,
+            ),
+            None => {
+                let t = if self.targets.contains_key(&self.last_stopped) { self.last_stopped } else { MAIN };
+                let params = json!({ "expression": expression, "generatePreview": true, "includeCommandLineAPI": true, "replMode": context == "repl", "silent": context != "repl" });
+                (t, self.call(t, "Runtime.evaluate", params)?)
+            }
         };
         if let Some(details) = r.get("exceptionDetails") {
             return Err(exception_text(details));
         }
-        let v = self.variable("", &r["result"]);
+        let v = self.variable(t, "", &r["result"]);
         Ok(json!({ "result": v["value"], "type": v["type"], "variablesReference": v["variablesReference"] }))
     }
 
-    fn exception_info(&mut self) -> Result<Value, String> {
-        let paused = self.paused.as_ref().ok_or("Not paused")?;
+    fn exception_info(&mut self, t: i64) -> Result<Value, String> {
+        let paused = self.targets.get(&t).and_then(|x| x.paused.as_ref()).ok_or("Not paused")?;
         let data = &paused["data"];
         let description = data["description"].as_str().unwrap_or("");
         Ok(json!({
@@ -1005,9 +1305,9 @@ impl Adapter {
     }
 
     fn source(&mut self, args: &Value) -> Result<Value, String> {
-        let reference = args["sourceReference"].as_u64().unwrap_or(0) as usize;
-        let script = self.source_refs.get(reference.wrapping_sub(1)).cloned().ok_or("Unknown source")?;
-        let r = self.call("Debugger.getScriptSource", json!({ "scriptId": script }))?;
+        let reference = args["sourceReference"].as_i64().unwrap_or(0);
+        let (t, script) = self.source_refs.get(&reference).cloned().ok_or("Unknown source")?;
+        let r = self.call(t, "Debugger.getScriptSource", json!({ "scriptId": script }))?;
         Ok(json!({ "content": r["scriptSource"], "mimeType": "text/javascript" }))
     }
 }

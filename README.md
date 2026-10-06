@@ -189,7 +189,7 @@ to create one.
 | `lldb-dap` | Rust, C, C++, Swift | `lldb-dap` (on the PATH or in Xcode) |
 | `debugpy` | Python | `debugpy`, with the workspace's `.venv` |
 | `go` | Go | Delve (`dlv dap`), launch or attach |
-| `node` | Node.js, TypeScript | our own adapter, with source maps |
+| `node` | Node.js, TypeScript | our own adapter, with source maps; child processes and workers are debugged too (`autoAttachChildProcesses`) |
 
 While stopped you get Variables, Watch, Call Stack, Breakpoints, a floating toolbar, values on
 hover, and the Debug Console. Breakpoints can have conditions, hit counts and log messages, and
@@ -477,8 +477,7 @@ Every setting is listed with its description in the Settings editor.
   their JavaScript code doesn't run. Extensions can't show web views.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
-- **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools. The Node.js
-  debugger doesn't follow child processes or workers.
+- **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
 - **Assistant:** Claude Code and Codex read files from disk, so Orbvane saves your unsaved changes
   before each message (`assistant.saveBeforeSending`).
 
