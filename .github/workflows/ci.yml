@@ -1,0 +1,43 @@
+# Builds and tests every pull request (and main after each push) on macOS: the build must have
+# no warnings and every test must pass. Tests that need tools the runner lacks skip themselves.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "14.0"
+      RUSTFLAGS: "-D warnings"
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Rust toolchain
+        run: rustup update stable && rustup default stable
+
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ci-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ci-${{ runner.os }}-
+
+      - name: Build
+        run: cargo build --locked --all-targets
+
+      - name: Test
+        run: cargo test --locked
