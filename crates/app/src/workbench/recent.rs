@@ -3,7 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{session, Effect, Workbench};
+use super::{session, Effect, Focus, Workbench};
 use crate::palette::{Action, Item, Palette, Picker};
 
 /// A path with the home folder shown as `~`, like the standard recent list.
@@ -28,6 +28,11 @@ fn recent_label(path: &Path) -> String {
 const DOCK_RECENT: usize = 10;
 
 /// The Dock menu's recent folders, newest first (picked: `Workbench::open_dock_recent`).
+/// The recent folders the system keeps for the Dock menu while Orbvane isn't running.
+pub fn recent_folders_for_system() -> Vec<PathBuf> {
+    session::recent_folders().into_iter().take(DOCK_RECENT).collect()
+}
+
 pub fn dock_folders() -> Vec<String> {
     session::recent_folders().iter().take(DOCK_RECENT).map(|p| recent_label(p)).collect()
 }
@@ -59,6 +64,22 @@ impl Workbench {
         }
     }
 
+    /// macOS asked to open `path`: a folder or workspace file opens like Open Recent; a file
+    /// opens in this window.
+    pub fn open_requested(&mut self, path: &Path) {
+        if path.is_dir() || crate::workspace::is_workspace_file(path) {
+            self.open_folder_by_user(path);
+        } else if path.is_file() {
+            self.open_file(path);
+            self.focus = Focus::Editor;
+        }
+    }
+
+    /// Whether this window has `path` open or inside one of its folders.
+    pub fn has_path(&self, path: &Path) -> bool {
+        self.workspace_id().as_deref() == Some(path) || self.folder_of(path).is_some()
+    }
+
     pub(super) fn clear_recent(&mut self) {
         session::clear_recent();
         self.effects.push(Effect::RecentChanged);
@@ -83,5 +104,36 @@ impl Workbench {
             p.message = Some("No recently opened folders".into());
         }
         self.palette = Some(p);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What macOS asks to open: a folder goes where Open Recent would send it, a file opens
+    /// here, and windows say which paths they have.
+    #[test]
+    fn opens_what_macos_asks_for() {
+        let dir = std::env::temp_dir().join(format!("orbvane-open-{}", std::process::id()));
+        let (a, b) = (dir.join("a"), dir.join("b"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        std::fs::write(a.join("x.txt"), "x\n").unwrap();
+        // SAFETY: every test that reads this wants the same scratch user data folder.
+        unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+        let mut wb = Workbench::new(Some(a.clone()), &[], std::sync::Arc::new(|| {}));
+        assert!(wb.has_path(&a) && wb.has_path(&a.join("x.txt")));
+        assert!(!wb.has_path(&b));
+
+        wb.take_effects();
+        wb.open_requested(&b);
+        let opened = wb.take_effects().into_iter().any(|e| matches!(e, Effect::OpenFolder { path, .. } if path == b));
+        assert!(opened);
+
+        wb.open_requested(&a.join("x.txt"));
+        assert_eq!(wb.active_doc().and_then(|d| d.buffer.path().map(Path::to_path_buf)), Some(a.join("x.txt")));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -68,6 +68,9 @@ enum UserEvent {
     Exit,
     /// Windows wait to be opened (`Core::pending`; only winit's handler can create them).
     OpenWindows,
+    /// macOS asked us to open these (the Dock's recent items, a drop on the Dock icon, Open
+    /// With in the Finder).
+    Open(Vec<PathBuf>),
 }
 
 /// One window: the native window, its renderer and its workbench.
@@ -89,6 +92,8 @@ struct Core {
     restore_others: bool,
     /// Windows to open next (`UserEvent::OpenWindows`).
     pending: Vec<SavedWindow>,
+    /// Paths macOS asked us to open before the first window existed.
+    opens_waiting: Vec<PathBuf>,
     /// The window in front: menu commands go to it.
     front: Option<WindowId>,
     /// The window whose popup menu is showing.
@@ -110,6 +115,7 @@ struct Core {
 enum Input {
     Window(WindowId, WindowEvent),
     Menu(muda::MenuId),
+    Open(Vec<PathBuf>),
 }
 
 impl Input {
@@ -118,6 +124,7 @@ impl Input {
     fn is_user_input(&self) -> bool {
         match self {
             Input::Menu(_) => true,
+            Input::Open(_) => false,
             Input::Window(_, e) => matches!(
                 e,
                 WindowEvent::MouseInput { state: ElementState::Pressed, .. }
@@ -549,6 +556,81 @@ fn install_dock_menu() {
     }
 }
 
+thread_local! {
+    /// Where `open_urls` sends what macOS asks us to open.
+    static OPEN_PROXY: RefCell<Option<EventLoopProxy<UserEvent>>> = const { RefCell::new(None) };
+}
+
+/// `application:openURLs:`: macOS asks us to open files or folders (a recent item in the Dock
+/// menu while we're not running, a drop on the Dock icon, Open With in the Finder).
+extern "C-unwind" fn open_urls(_this: *mut objc2::runtime::AnyObject, _sel: objc2::runtime::Sel, _app: *mut objc2::runtime::AnyObject, urls: *mut objc2::runtime::AnyObject) {
+    use objc2::runtime::AnyObject;
+    let mut paths = Vec::new();
+    // SAFETY: `urls` is an NSArray of NSURLs; NSString's UTF8String lives as long as the string.
+    unsafe {
+        let n: usize = objc2::msg_send![urls, count];
+        for i in 0..n {
+            let url: *mut AnyObject = objc2::msg_send![urls, objectAtIndex: i];
+            let is_file: bool = objc2::msg_send![url, isFileURL];
+            if !is_file {
+                continue;
+            }
+            let path: *mut AnyObject = objc2::msg_send![url, path];
+            let utf8: *const std::ffi::c_char = objc2::msg_send![path, UTF8String];
+            if !utf8.is_null() {
+                paths.push(PathBuf::from(std::ffi::CStr::from_ptr(utf8).to_string_lossy().into_owned()));
+            }
+        }
+    }
+    if !paths.is_empty() {
+        OPEN_PROXY.with(|p| {
+            if let Some(proxy) = &*p.borrow() {
+                let _ = proxy.send_event(UserEvent::Open(paths));
+            }
+        });
+    }
+}
+
+/// Gives the app delegate (winit's) an `application:openURLs:` answering `open_urls`. Done
+/// before the event loop runs: a launch that opens something delivers it while launching.
+fn install_open_handler(proxy: EventLoopProxy<UserEvent>) {
+    use objc2::runtime::{AnyClass, AnyObject, Imp};
+    type OpenFn = extern "C-unwind" fn(*mut AnyObject, objc2::runtime::Sel, *mut AnyObject, *mut AnyObject);
+    OPEN_PROXY.with(|p| *p.borrow_mut() = Some(proxy));
+    // SAFETY: main thread; the method's types ("v@:@@": returns nothing, takes self, _cmd, the
+    // application and the URLs) match `open_urls`.
+    unsafe {
+        let app: *mut AnyObject = objc2::msg_send![objc2::class!(NSApplication), sharedApplication];
+        let delegate: *mut AnyObject = objc2::msg_send![app, delegate];
+        if delegate.is_null() {
+            return;
+        }
+        let class = (*delegate).class() as *const AnyClass as *mut AnyClass;
+        let imp: Imp = std::mem::transmute::<OpenFn, Imp>(open_urls);
+        objc2::ffi::class_addMethod(class, objc2::sel!(application:openURLs:), imp, c"v@:@@".as_ptr());
+        let _: () = objc2::msg_send![app, setDelegate: delegate];
+    }
+}
+
+/// Mirrors our recent folders into the system's recent documents, newest first, so the Dock
+/// menu lists them while Orbvane isn't running. (Only an app bundle that declares folders as a
+/// document type gets them; `cargo run` doesn't.)
+fn sync_system_recents(folders: &[PathBuf]) {
+    use objc2::runtime::AnyObject;
+    // SAFETY: main thread; NSDocumentController and NSURL calls with valid objects.
+    unsafe {
+        let controller: *mut AnyObject = objc2::msg_send![objc2::class!(NSDocumentController), sharedDocumentController];
+        let none: *mut AnyObject = std::ptr::null_mut();
+        let _: () = objc2::msg_send![controller, clearRecentDocuments: none];
+        for folder in folders.iter().rev() {
+            let Ok(c) = std::ffi::CString::new(folder.to_string_lossy().as_bytes()) else { continue };
+            let s: *mut AnyObject = objc2::msg_send![objc2::class!(NSString), stringWithUTF8String: c.as_ptr()];
+            let url: *mut AnyObject = objc2::msg_send![objc2::class!(NSURL), fileURLWithPath: s, isDirectory: true];
+            let _: () = objc2::msg_send![controller, noteNewRecentDocumentURL: url];
+        }
+    }
+}
+
 /// A new window's attributes: at `bounds` if that spot is still on a screen, else cascaded
 /// from `near` (the window in front).
 fn window_attributes(event_loop: &ActiveEventLoop, bounds: Option<WindowBounds>, near: Option<&Window>) -> winit::window::WindowAttributes {
@@ -644,6 +726,26 @@ impl Core {
     fn update_recent_menu(&self) {
         if let Some(i) = self.front_index() {
             update_recent_menu(&self.wins[i].workbench.recent_menu());
+        }
+        sync_system_recents(&workbench::recent_folders_for_system());
+    }
+
+    /// Opens what macOS asked for: a folder like Open Recent does (its window comes forward, or
+    /// a new one), a file in the window whose folder has it (else the one in front). Before the
+    /// first window exists they wait.
+    fn open_paths(&mut self, paths: Vec<PathBuf>) {
+        if self.wins.is_empty() {
+            self.opens_waiting.extend(paths);
+            return;
+        }
+        for path in paths {
+            let i = self.wins.iter().position(|w| w.workbench.has_path(&path)).or_else(|| self.front_index()).unwrap_or(0);
+            let w = &mut self.wins[i];
+            w.workbench.activate();
+            w.workbench.open_requested(&path);
+            w.window.focus_window();
+            self.front = Some(w.window.id());
+            self.dirty.push(w.window.id());
         }
     }
 
@@ -852,6 +954,7 @@ impl Core {
     fn handle(&mut self, input: Input) {
         let (id, event) = match input {
             Input::Menu(id) => return self.menu(id),
+            Input::Open(paths) => return self.open_paths(paths),
             Input::Window(id, e) => (id, e),
         };
         let Some(i) = self.index(id) else { return };
@@ -936,6 +1039,11 @@ impl ApplicationHandler<UserEvent> for App {
         let others = if core.restore_others { workbench.windows_to_restore() } else { Vec::new() };
         core.add(window, workbench);
         core.update_recent_menu();
+        let waiting = std::mem::take(&mut core.opens_waiting);
+        if !waiting.is_empty() {
+            core.open_paths(waiting);
+            core.apply_effects();
+        }
         // The other windows of the last session, then the first one back in front.
         if !others.is_empty() {
             let first = core.wins[0].window.clone();
@@ -949,6 +1057,7 @@ impl ApplicationHandler<UserEvent> for App {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, event: UserEvent) {
         match event {
             UserEvent::Menu(id) => self.push(Input::Menu(id)),
+            UserEvent::Open(paths) => self.push(Input::Open(paths)),
             UserEvent::Exit => event_loop.exit(),
             UserEvent::Wake => {
                 if let Ok(core) = self.shared.core.try_borrow() {
@@ -1111,6 +1220,7 @@ fn main() {
     }
     let event_loop = EventLoop::<UserEvent>::with_user_event().build().expect("failed to create event loop");
     let proxy = event_loop.create_proxy();
+    install_open_handler(proxy.clone());
     let lsp_proxy = proxy.clone();
     let waker: lsp::Waker = std::sync::Arc::new(move || {
         let _ = lsp_proxy.send_event(UserEvent::Wake);
@@ -1121,6 +1231,7 @@ fn main() {
         first: Some(Workbench::new(folder, &files, waker.clone())),
         restore_others,
         pending: Vec::new(),
+        opens_waiting: Vec::new(),
         front: None,
         popup_owner: None,
         checker: None,

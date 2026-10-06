@@ -71,7 +71,9 @@ Click a section to expand it.
 - **Windows:** one folder per window. New Window (⇧⌘N) opens an empty one; Open Folder and Open
   Recent open a folder in a new window once the current one has a folder
   (`window.openFoldersInNewWindow`), and a folder that's already open brings its window forward.
-  Right-click Orbvane in the Dock for New Window and the recent folders.
+  Right-click Orbvane in the Dock for New Window and the recent folders (listed even while it's
+  closed). Drop a folder or file on its Dock icon, or pick Orbvane under Open With in the Finder,
+  to open it.
 - **Themes:** Orbvane Night (the default), Orbvane Day (its light pair) and Orbvane Dark (a deep
   graphite), chosen with ⌘K ⌘T. Standard color theme files work too, from extensions or
   `~/Library/Application Support/Orbvane/themes`.

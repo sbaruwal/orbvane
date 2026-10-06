@@ -87,7 +87,7 @@ mod workspaces;
 pub(crate) use assistant::AgentAction;
 pub use debug::DebugPick;
 pub use git_actions::{GitInput, GitPick};
-pub use recent::dock_folders;
+pub use recent::{dock_folders, recent_folders_for_system};
 pub use session::{save_windows, window_bounds, SavedWindow, WindowBounds};
 
 const TITLE_H: f32 = 35.0;

@@ -63,6 +63,22 @@ jobs:
           pb "Add :LSApplicationCategoryType string public.app-category.developer-tools"
           pb "Add :LSMinimumSystemVersion string $MACOSX_DEPLOYMENT_TARGET"
           pb "Add :NSHighResolutionCapable bool true"
+          # Folders and text files: Open With in the Finder, drops on the Dock icon, and the
+          # recent folders in the Dock menu while the app isn't running. "Alternate" never makes
+          # Orbvane the default app for them.
+          pb "Add :CFBundleDocumentTypes array"
+          doc_type() { # index, name, content types...
+            local i=$1 name=$2 j=0
+            shift 2
+            pb "Add :CFBundleDocumentTypes:$i dict"
+            pb "Add :CFBundleDocumentTypes:$i:CFBundleTypeName string $name"
+            pb "Add :CFBundleDocumentTypes:$i:CFBundleTypeRole string Editor"
+            pb "Add :CFBundleDocumentTypes:$i:LSHandlerRank string Alternate"
+            pb "Add :CFBundleDocumentTypes:$i:LSItemContentTypes array"
+            for u in "$@"; do pb "Add :CFBundleDocumentTypes:$i:LSItemContentTypes:$j string $u"; j=$((j+1)); done
+          }
+          doc_type 0 Folder public.folder
+          doc_type 1 Text public.text public.source-code
           plutil -lint "$plist"
 
       - name: Import the signing certificate
