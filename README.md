@@ -527,7 +527,8 @@ cd orbvane
 cargo run --release -- <folder> [files...]
 ```
 
-Needs a recent stable Rust on macOS 14 or later. To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md).
+Needs a recent stable Rust on macOS 14 or later. To contribute, see [CONTRIBUTING.md](CONTRIBUTING.md);
+to report a security problem, see [SECURITY.md](SECURITY.md).
 
 <details>
 <summary>How it's built, and the crates</summary>

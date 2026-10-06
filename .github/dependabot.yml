@@ -1,0 +1,17 @@
+# Weekly checks for newer crates and GitHub Actions. Security fixes come separately, as soon as
+# an advisory is published (Dependabot security updates, turned on in the repository settings).
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch updates in one PR a week; major versions come one by one.
+      minor-and-patch:
+        update-types: [minor, patch]
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
