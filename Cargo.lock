@@ -20,7 +20,7 @@ checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
 
 [[package]]
 name = "acp"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -81,7 +81,7 @@ checksum = "fc7eb209b1518d6bb87b283c20095f5228ecda460da70b44f0802523dea6da04"
 
 [[package]]
 name = "app"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "acp",
  "arboard",
@@ -321,7 +321,7 @@ dependencies = [
 
 [[package]]
 name = "cargo-orbvane"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "extensions",
  "search",
@@ -504,7 +504,7 @@ checksum = "460fbee9c2c2f33933d720630a6a0bac33ba7053db5344fac858d4b8952d77d5"
 
 [[package]]
 name = "css"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "lsp",
  "serde",
@@ -519,7 +519,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "dap"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
 ]
@@ -596,7 +596,7 @@ checksum = "0b5343afd4a8365a643ac588dab4cf234a190c7f6c88c9f6dd6ffe00837661b7"
 
 [[package]]
 name = "extensions"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
  "theme",
@@ -720,7 +720,7 @@ checksum = "aa9a19cbb55df58761df49b23516a86d432839add4af60fc256da840f66ed35b"
 
 [[package]]
 name = "fswatch"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "futures-channel"
@@ -1071,7 +1071,7 @@ checksum = "e17592d60ebacc7d5e169f4663c5f84f9161cc90328abcfe8456f41e4dfcb284"
 
 [[package]]
 name = "html"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "css",
  "lsp",
@@ -1197,7 +1197,7 @@ dependencies = [
 
 [[package]]
 name = "json"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "lsp",
  "regex",
@@ -1216,7 +1216,7 @@ dependencies = [
 
 [[package]]
 name = "language"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
  "streaming-iterator",
@@ -1354,7 +1354,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lsp"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
 ]
@@ -1849,7 +1849,7 @@ dependencies = [
 
 [[package]]
 name = "orbvane-extension"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde_json",
 ]
@@ -2217,7 +2217,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "render"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "bytemuck",
  "cosmic-text",
@@ -2340,7 +2340,7 @@ dependencies = [
 
 [[package]]
 name = "scm"
-version = "0.3.3"
+version = "0.3.4"
 
 [[package]]
 name = "scoped-tls"
@@ -2369,7 +2369,7 @@ dependencies = [
 
 [[package]]
 name = "search"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "regex",
 ]
@@ -2441,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "settings"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -2654,7 +2654,7 @@ checksum = "61c41af27dd6d1e27b1b16b489db798443478cef1f06a660c96db617ba5de3b1"
 
 [[package]]
 name = "terminal"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "libc",
  "unicode-width",
@@ -2663,14 +2663,14 @@ dependencies = [
 
 [[package]]
 name = "text"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "ropey",
 ]
 
 [[package]]
 name = "theme"
-version = "0.3.3"
+version = "0.3.4"
 dependencies = [
  "serde",
  "serde_json",
