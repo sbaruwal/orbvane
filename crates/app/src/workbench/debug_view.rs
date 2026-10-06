@@ -109,7 +109,7 @@ impl Workbench {
         let title_right = header.x + 20.0 + c.measure(super::View::Debug.title(), &TextStyle::ui(SMALL, self.color("sideBarTitle.foreground"))) + 10.0;
         let w = (c.measure(&name, &style) + 44.0).min(gear.x - 4.0 - title_right).max(60.0);
         let pick = Rect::new(gear.x - 4.0 - w, header.y + 6.0, w, 22.0);
-        c.bordered(pick, self.color("dropdown.background"), self.color("dropdown.border"), 1.0, 2.0);
+        c.bordered(pick, self.color("dropdown.background"), self.color("dropdown.border"), 1.0, super::controls::FIELD_RADIUS);
         let play = Rect::new(pick.x, pick.y, 22.0, pick.h);
         if self.hovered(Hit::DebugStartButton) {
             c.fill(play, self.color("toolbar.hoverBackground"));
@@ -174,38 +174,16 @@ impl Workbench {
         }
     }
 
+    /// No launch configurations yet: start the active file, or write a `launch.json`.
     fn draw_debug_welcome(&mut self, c: &mut Canvas, r: Rect) {
-        let fg = self.color_or("sideBar.foreground", "foreground");
-        let button = Rect::new(r.x + 20.0, r.y + 12.0, r.w - 40.0, 26.0);
-        let bg = self.color(if self.hovered(Hit::DebugStartButton) { "button.hoverBackground" } else { "button.background" });
-        c.fill_rounded(button, bg, 2.0);
-        let bs = TextStyle::ui(UI, self.color("button.foreground"));
-        let label = "Run and Debug";
-        let tw = c.measure(label, &bs);
-        c.text_in(Rect::new(button.x + (button.w - tw) / 2.0, button.y, tw + 2.0, button.h), label, &bs);
-        self.hits.push((button, Hit::DebugStartButton));
+        let detail = "Runs the active file with the debugger for its language.";
+        let bottom = self.empty_state(c, r, &icons::RUN_DEBUG, "Run and debug", detail, Some(("Run and Debug", Hit::DebugStartButton)));
         if self.folder().is_some() {
-            // "To customize Run and Debug create a launch.json file.", the link part clickable,
-            // laid out word by word.
-            let style = TextStyle::ui(UI, fg);
-            let link = TextStyle::ui(UI, self.color("textLink.foreground"));
-            let words = "To customize Run and Debug".split(' ').map(|w| (w, false)).chain("create a launch.json file.".split(' ').map(|w| (w, true)));
-            let (left, right) = (r.x + 20.0, r.right() - 20.0);
-            let (mut x, mut y) = (left, button.bottom() + 14.0);
-            let space = c.measure(" ", &style);
-            for (word, is_link) in words {
-                let st = if is_link { &link } else { &style };
-                let w = c.measure(word, st);
-                if x > left && x + w > right {
-                    x = left;
-                    y += 18.0;
-                }
-                c.text(x, y, word, st);
-                if is_link {
-                    self.hits.push((Rect::new(x, y, w + space, 18.0), Hit::DebugCreateLaunch));
-                }
-                x += w + space;
-            }
+            let st = TextStyle::ui(UI, self.color("foreground"));
+            let label = "Create launch.json";
+            let bw = (c.measure(label, &st) + 32.0).min(r.w - 24.0);
+            let b = Rect::new(r.x + (r.w - bw) / 2.0, bottom + 8.0, bw, super::controls::FIELD_H);
+            self.button(c, b, label, super::controls::ButtonKind::Secondary, true, Hit::DebugCreateLaunch);
         }
     }
 

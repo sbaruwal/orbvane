@@ -24,6 +24,7 @@ mod welcome;
 mod aux_bar;
 mod code_lens;
 mod color_picker;
+mod controls;
 mod color_decorators;
 mod debug;
 mod debug_view;
@@ -127,6 +128,10 @@ const TRAFFIC_LIGHTS_W: f32 = 78.0;
 const TAB_H: f32 = 35.0;
 const BREADCRUMB_H: f32 = 22.0;
 const PANEL_HEADER_H: f32 = 35.0;
+/// The palette's input, rows and group headings.
+const PALETTE_INPUT: f32 = 52.0;
+const PALETTE_ROW: f32 = 30.0;
+const PALETTE_HEADER: f32 = 24.0;
 const ROW_H: f32 = 22.0;
 const UI: f32 = 13.0;
 const SMALL: f32 = 11.0;
@@ -135,6 +140,7 @@ const PANEL_TABS: &[&str] = &["PROBLEMS", "OUTPUT", "DEBUG CONSOLE", "TERMINAL",
 const PANEL_OUTPUT: usize = 1;
 const PANEL_DEBUG_CONSOLE: usize = 2;
 const PANEL_TERMINAL: usize = 3;
+const PANEL_PORTS: usize = 4;
 /// Test Results, shown after PORTS while the folder has tests.
 const PANEL_TEST_RESULTS: usize = 5;
 
@@ -273,7 +279,6 @@ enum Hit {
     TerminalTabAction(usize, usize, bool),
     NewTerminal,
     SplitTerminal,
-    KillTerminal,
     SearchField(search_view::Field),
     SearchToggle(search_view::SearchToggle),
     ReplaceAll,
@@ -1811,7 +1816,8 @@ impl Workbench {
         if self.chord_key(&k) {
             return;
         }
-        if self.focus == Focus::Editor && self.settings_active() {
+        // The Settings sheet is modal: it takes the keys while it's open.
+        if self.settings_active() {
             self.focus = Focus::Settings;
         }
         if self.focus == Focus::Settings {
@@ -2483,7 +2489,7 @@ impl Workbench {
             Hit::Tab(g, i) => {
                 self.active_group = g;
                 self.groups[g].active = i;
-                self.focus = if self.settings_active() { Focus::Settings } else { Focus::Editor };
+                self.focus = Focus::Editor;
                 if count == 2 {
                     self.pin_active();
                 }
@@ -2612,7 +2618,6 @@ impl Workbench {
             Hit::TerminalTabAction(g, p, split) => self.terminal_tab_action(g, p, split),
             Hit::NewTerminal => self.new_terminal(),
             Hit::SplitTerminal => self.split_terminal(),
-            Hit::KillTerminal => self.kill_terminal(),
             Hit::PanelBody | Hit::StatusItem(_) => {}
             Hit::PaletteBackdrop | Hit::PaletteBox | Hit::PaletteRow(_) => {}
             Hit::HoverPopup | Hit::CompletionBox | Hit::CompletionRow(_) => {}
@@ -2705,7 +2710,7 @@ impl Workbench {
             }
             Some(Hit::PaletteRow(_)) => {
                 if let Some(p) = &mut self.palette {
-                    let steps = (-dy / ROW_H).round() as isize;
+                    let steps = (-dy / PALETTE_ROW).round() as isize;
                     let max = p.items.len().saturating_sub(MAX_VISIBLE);
                     p.scroll = (p.scroll as isize + steps).clamp(0, max as isize) as usize;
                 }
@@ -2841,6 +2846,9 @@ impl Workbench {
         }
 
         self.draw_intel_overlays(c);
+        if self.settings_active() {
+            self.draw_settings_sheet(c, full);
+        }
         self.draw_toasts(c, Rect::new(main.x, main.y, main.w, main.h));
         if self.palette.is_some() {
             self.draw_palette(c, full);
@@ -3174,15 +3182,7 @@ impl Workbench {
 
         let fg = self.color_or("sideBar.foreground", "foreground");
         if self.tree.is_none() {
-            let style = TextStyle::ui(UI, fg);
-            c.text(rows_rect.x + 20.0, rows_rect.y + 10.0, "You have not yet opened a folder.", &style);
-            let button = Rect::new(rows_rect.x + 20.0, rows_rect.y + 42.0, rows_rect.w - 40.0, 26.0);
-            let bg = self.color(if self.hovered(Hit::OpenFolderButton) { "button.hoverBackground" } else { "button.background" });
-            c.fill_rounded(button, bg, 2.0);
-            let bs = TextStyle::ui(UI, self.color("button.foreground"));
-            let tw = c.measure("Open Folder", &bs);
-            c.text_in(Rect::new(button.x + (button.w - tw) / 2.0, button.y, tw + 2.0, button.h), "Open Folder", &bs);
-            self.hits.push((button, Hit::OpenFolderButton));
+            self.empty_state(c, rows_rect, &icons::FOLDER, "No folder open", "Open a folder to see its files here.", Some(("Open Folder", Hit::OpenFolderButton)));
             return;
         }
 
@@ -3379,13 +3379,6 @@ impl Workbench {
     fn draw_group(&mut self, c: &mut Canvas, g: usize, r: Rect, active_group: bool) {
         let (tabs_rect, body) = r.cut_top(TAB_H);
         self.draw_tabs(c, g, tabs_rect, active_group);
-        if self.groups[g].tabs.get(self.groups[g].active).is_some_and(|t| t.settings) {
-            let focused = active_group && self.focus == Focus::Settings && self.palette.is_none();
-            c.push_clip(body);
-            self.draw_settings_editor(c, body, focused);
-            c.pop_clip();
-            return;
-        }
         if self.groups[g].tabs.get(self.groups[g].active).is_some_and(|t| t.welcome) {
             c.push_clip(body);
             self.draw_welcome(c, body);
@@ -3544,7 +3537,6 @@ impl Workbench {
                     None if t.markdown.as_ref().is_some_and(|m| m.extension.is_some()) => (doc.title(), false, PathBuf::new()),
                     None if t.markdown.is_some() => (format!("Preview {}", doc.title()), false, path),
                     None if t.merge.is_some() => (format!("Merging: {}", doc.title()), doc.buffer.is_dirty(), path),
-                    None if t.settings => ("Settings".to_string(), false, PathBuf::new()),
                     None if t.welcome => ("Welcome".to_string(), false, PathBuf::new()),
                     None => (doc.title(), doc.buffer.is_dirty(), path),
                 }
@@ -3579,9 +3571,7 @@ impl Workbench {
                 Some(s) => scm_view::status_color(&self.theme, s).with_alpha(if is_active { 1.0 } else { 0.8 }),
                 None => fg,
             };
-            if self.groups[g].tabs[i].settings {
-                c.icon(&icons::SETTINGS, tr.x + 11.0, tr.y + 10.5, 14.0, self.color("icon.foreground"));
-            } else if self.groups[g].tabs[i].welcome {
+            if self.groups[g].tabs[i].welcome {
                 c.icon(&icons::INFO, tr.x + 11.0, tr.y + 10.5, 14.0, self.color("icon.foreground"));
             } else {
                 c.icon(&icons::FILE, tr.x + 11.0, tr.y + 10.5, 14.0, file_color(path));
@@ -3697,66 +3687,82 @@ impl Workbench {
         self.show_popup(entries, r.x, r.bottom());
     }
 
+    /// The panel's tabs that show: Problems, Output and Terminal always; Debug Console, Ports
+    /// and Test Results when they have something (or are open). Indexes into `PANEL_TABS`.
+    fn panel_tabs(&self) -> Vec<usize> {
+        (0..PANEL_TABS.len() + 1)
+            .filter(|&i| match i {
+                PANEL_DEBUG_CONSOLE => self.debug.session.is_some() || !self.debug.console.is_empty(),
+                PANEL_PORTS => false,
+                PANEL_TEST_RESULTS => self.testing.is_running() || !self.testing.output.is_empty(),
+                _ => true,
+            } || i == self.panel_tab)
+            .collect()
+    }
+
     fn draw_panel(&mut self, c: &mut Canvas, r: Rect) {
-        c.fill(r, self.color("panel.background"));
-        c.fill(Rect::new(r.x, r.y, r.w, 1.0), self.color("panel.border"));
+        // A rounded card inset in the editor area.
+        c.fill(r, self.color("editor.background"));
+        let card = Rect::new(r.x + 8.0, r.y + 2.0, (r.w - 16.0).max(0.0), (r.h - 10.0).max(0.0));
+        c.bordered(card, self.color("panel.background"), self.color("panel.border"), 1.0, controls::CARD_RADIUS);
         self.hits.push((r, Hit::PanelBody));
-        let (header, body) = r.cut_top(PANEL_HEADER_H);
-        let mut x = header.x + 8.0;
-        let mut tabs = PANEL_TABS.to_vec();
-        if self.testing.active() {
-            tabs.push("TEST RESULTS");
-        }
-        for (i, label) in tabs.iter().enumerate() {
+        let (header, rest) = card.cut_top(PANEL_HEADER_H);
+        let body = Rect::new(rest.x + 4.0, rest.y, (rest.w - 8.0).max(0.0), (rest.h - 6.0).max(0.0));
+        let mut x = header.x + 6.0;
+        for i in self.panel_tabs() {
             let active = i == self.panel_tab;
             let hovered = self.hovered(Hit::PanelTab(i));
             let color = self.color(if active || hovered { "panelTitle.activeForeground" } else { "panelTitle.inactiveForeground" });
             let style = TextStyle::ui(12.0, color).weight(if active { 600 } else { 400 });
-            let label = calm(label);
+            let label = calm(PANEL_TABS.get(i).copied().unwrap_or("TEST RESULTS"));
+            let icon = match i {
+                0 => &icons::WARNING,
+                1 => &icons::LIST_SELECTION,
+                PANEL_DEBUG_CONSOLE => &icons::RUN_DEBUG,
+                PANEL_TERMINAL => &icons::TERMINAL,
+                PANEL_PORTS => &icons::REMOTE,
+                _ => &icons::BEAKER,
+            };
+            let count = match i {
+                0 => self.lsp.diagnostics.values().map(|(_, d)| d.len()).sum(),
+                PANEL_TERMINAL if self.terms.count() > 1 => self.terms.count(),
+                _ => 0,
+            };
             let w = c.measure(&label, &style);
-            let problems = if i == 0 { self.lsp.diagnostics.values().map(|(_, d)| d.len()).sum() } else { 0 };
-            let badge_w = if problems > 0 { c.measure(&problems.to_string(), &TextStyle::ui(SMALL, color)) + 16.0 } else { 0.0 };
-            let tab = Rect::new(x, header.y, w + 20.0 + badge_w, header.h);
-            // A segmented control: the active tab is a rounded chip.
-            let chip = Rect::new(x + 2.0, header.y + 6.0, tab.w - 4.0, header.h - 12.0);
+            let badge_w = if count > 0 { c.measure(&count.to_string(), &TextStyle::ui(SMALL, color)) + 16.0 } else { 0.0 };
+            let chip = Rect::new(x, header.y + 6.0, 10.0 + 14.0 + 6.0 + w + badge_w + 10.0, header.h - 12.0);
+            // Chips like the editor's tabs: the active one filled and outlined.
             if active {
-                c.fill_rounded(chip, self.color_or("activityBarTop.activeBackground", "list.inactiveSelectionBackground"), 6.0);
+                c.bordered(chip, self.color("tab.activeBackground"), self.color("tab.activeBorderTop").with_alpha(0.55), 1.0, 7.0);
             } else if hovered {
-                c.fill_rounded(chip, self.color("toolbar.hoverBackground"), 6.0);
+                c.fill_rounded(chip, self.color("toolbar.hoverBackground"), 7.0);
             }
-            c.text_in(Rect::new(x + 10.0, header.y, w + 2.0, header.h), &label, &style);
-            if problems > 0 {
-                self.badge(c, x + 16.0 + w, header.y + 10.0, problems);
+            c.icon(icon, chip.x + 10.0, chip.y + (chip.h - 14.0) / 2.0, 14.0, color);
+            c.text_in(Rect::new(chip.x + 30.0, chip.y, w + 2.0, chip.h), &label, &style);
+            if count > 0 {
+                self.badge(c, chip.x + 36.0 + w, chip.y + (chip.h - 16.0) / 2.0, count);
             }
-            self.hits.push((tab, Hit::PanelTab(i)));
-            x += tab.w;
+            self.hits.push((chip, Hit::PanelTab(i)));
+            x = chip.right() + 4.0;
         }
         let fg = self.color("icon.foreground");
         let max_icon = if self.panel_maximized { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_UP };
-        self.icon_button(c, Rect::new(header.right() - 60.0, header.y + 7.0, 24.0, 22.0), max_icon, Hit::PanelMaximize, fg);
-        self.icon_button(c, Rect::new(header.right() - 32.0, header.y + 7.0, 24.0, 22.0), &icons::CLOSE, Hit::PanelClose, fg);
+        self.icon_button(c, Rect::new(header.right() - 58.0, header.y + 7.0, 24.0, 22.0), max_icon, Hit::PanelMaximize, fg);
+        self.icon_button(c, Rect::new(header.right() - 30.0, header.y + 7.0, 24.0, 22.0), &icons::CLOSE, Hit::PanelClose, fg);
 
         if self.panel_tab == 0 {
-            self.draw_problems_filter(c, header, header.right() - 70.0);
+            self.draw_problems_filter(c, header, header.right() - 68.0);
         }
         if self.panel_tab == 1 {
-            self.draw_output_channel_picker(c, header, header.right() - 70.0);
+            self.draw_output_channel_picker(c, header, header.right() - 68.0);
         }
         if self.panel_tab == PANEL_TERMINAL {
-            // Terminal actions left of the maximize/close buttons, and the terminal's title
-            // while the terminal list is hidden (a single terminal).
-            let right = header.right() - 70.0;
-            self.icon_button(c, Rect::new(right - 28.0, header.y + 7.0, 24.0, 22.0), &icons::TRASH, Hit::KillTerminal, fg);
-            self.icon_button(c, Rect::new(right - 56.0, header.y + 7.0, 24.0, 22.0), &icons::SPLIT, Hit::SplitTerminal, fg);
-            self.icon_button(c, Rect::new(right - 84.0, header.y + 7.0, 24.0, 22.0), &icons::ADD, Hit::NewTerminal, fg);
-            if !self.terminal_tabs_visible() {
-                let name = self.terminal_title();
-                let st = TextStyle::ui(12.0, self.color("panelTitle.activeForeground"));
-                let nw = c.measure(&name, &st);
-                let label_x = right - 92.0 - nw;
-                c.icon(&icons::TERMINAL, label_x - 20.0, header.y + 10.0, 16.0, fg);
-                c.text_in(Rect::new(label_x, header.y, nw + 2.0, header.h), &name, &st);
-            }
+            let right = header.right() - 68.0;
+            self.icon_button(c, Rect::new(right - 28.0, header.y + 7.0, 24.0, 22.0), &icons::SPLIT, Hit::SplitTerminal, fg);
+            self.icon_button(c, Rect::new(right - 56.0, header.y + 7.0, 24.0, 22.0), &icons::ADD, Hit::NewTerminal, fg);
+            // A divider, then the terminals.
+            c.fill(Rect::new(x + 4.0, header.y + 10.0, 1.0, header.h - 20.0), self.color("panel.border"));
+            self.draw_terminal_chips(c, Rect::new(x + 12.0, header.y, (right - 60.0 - x - 12.0).max(0.0), header.h));
         }
         match self.panel_tab {
             0 => return self.draw_problems(c, body),
@@ -3766,14 +3772,7 @@ impl Workbench {
             PANEL_TEST_RESULTS => return self.draw_test_results(c, body),
             _ => {}
         }
-        let msg = match self.panel_tab {
-            4 => "No forwarded ports.",
-            _ => "",
-        };
-        let style = TextStyle::ui(UI, self.color("foreground"));
-        c.push_clip(body);
-        c.text(body.x + 20.0, body.y + 4.0, msg, &style);
-        c.pop_clip();
+        self.empty_state(c, body, &icons::REMOTE, "No forwarded ports", "Ports a task or debug session forwards show here.", None);
     }
 
     /// A status bar pill at `x`: an optional icon (spinning by `turn`) and text, outlined and
@@ -3903,7 +3902,7 @@ impl Workbench {
         let mut language_item = None;
         if let Some(pv) = self.active_editor().and_then(|e| e.image.as_ref()) {
             items.extend(pv.status());
-        } else if let (Some(ed), Some(doc)) = (self.active_editor().filter(|e| !e.settings && !e.welcome && !e.markdown.as_ref().is_some_and(|m| m.extension.is_some())), self.active_doc()) {
+        } else if let (Some(ed), Some(doc)) = (self.active_editor().filter(|e| !e.welcome && !e.markdown.as_ref().is_some_and(|m| m.extension.is_some())), self.active_doc()) {
             let (line, col) = ed.line_col();
             let sels = ed.selections();
             let selected: usize = sels.iter().map(|s| doc.buffer.text_in(s).chars().count()).sum();
@@ -3995,60 +3994,69 @@ impl Workbench {
         c.push_layer();
         self.hits.push((full, Hit::PaletteBackdrop));
         let Some(p) = self.palette.as_ref() else { return };
-        let w = (full.w * 0.62).clamp(300.0, 600.0);
-        let rows = match &p.input_box {
+        // A faint scrim, so the card reads as in front.
+        c.fill(full, self.color("widget.shadow").with_alpha(0.18));
+        // Centered, in the upper part of the window.
+        let w = (full.w * 0.56).clamp(360.0, 680.0);
+        let visible: Vec<usize> = (p.scroll..(p.scroll + MAX_VISIBLE).min(p.items.len())).collect();
+        let headers = visible.iter().filter(|&&i| p.starts_group(i)).count();
+        let list_h = match &p.input_box {
             // An input box shows its prompt (one row per line) or its validation error.
-            Some(b) if b.error.is_none() => b.prompt.lines().count().max(1),
-            Some(_) => 1,
-            None => p.items.len().clamp(1, MAX_VISIBLE),
+            Some(b) if b.error.is_none() => b.prompt.lines().count().max(1) as f32 * PALETTE_ROW,
+            Some(_) => PALETTE_ROW,
+            None if p.items.is_empty() => PALETTE_ROW + 8.0,
+            None => visible.len() as f32 * PALETTE_ROW + headers as f32 * PALETTE_HEADER,
         };
-        let h = 6.0 + 26.0 + 6.0 + rows as f32 * ROW_H + 6.0;
-        let bx = Rect::new(((full.w - w) / 2.0).round(), 6.0, w, h);
-        c.shadow(bx, 6.0, self.color("widget.shadow"));
-        c.bordered(bx, self.color("quickInput.background"), self.color("widget.border"), 1.0, 6.0);
+        let h = PALETTE_INPUT + 1.0 + 6.0 + list_h + 8.0;
+        let top = full.y + (full.h * 0.16).clamp(44.0, 160.0);
+        let bx = Rect::new((full.x + (full.w - w) / 2.0).round(), top.round(), w, h);
+        c.shadow(bx, 14.0, self.color("widget.shadow"));
+        c.bordered(bx, self.color("quickInput.background"), self.color("widget.border"), 1.0, 14.0);
         self.hits.push((bx, Hit::PaletteBox));
 
-        // Input box.
-        let input = Rect::new(bx.x + 6.0, bx.y + 6.0, bx.w - 12.0, 26.0);
+        // The input: large, with a search icon, and a line under it.
         let error = p.input_box.as_ref().and_then(|b| b.error.clone());
-        let border = if error.is_some() { self.color("inputValidation.errorBorder") } else { self.color("focusBorder") };
-        c.bordered(input, self.color("input.background"), border, 1.0, 2.0);
-        let style = TextStyle::ui(UI, self.color("input.foreground"));
-        let text_rect = Rect::new(input.x + 6.0, input.y, input.w - 12.0, input.h);
+        let input = Rect::new(bx.x, bx.y, bx.w, PALETTE_INPUT);
+        let dim = self.color("descriptionForeground");
+        c.icon(&icons::SEARCH, input.x + 18.0, input.y + (input.h - 18.0) / 2.0, 18.0, dim);
+        let big = TextStyle::ui(17.0, self.color("input.foreground"));
+        let text_rect = Rect::new(input.x + 46.0, input.y, input.w - 62.0, input.h);
         c.push_clip(input);
         let tw = if p.input.is_empty() {
-            let ph = TextStyle::ui(UI, self.color("input.placeholderForeground"));
-            c.text_in(text_rect, p.placeholder(), &ph);
-            0.0
+            c.text_fit(text_rect, p.placeholder(), &big.color(self.color("input.placeholderForeground")))
+                .min(0.0)
         } else if p.input_box.as_ref().is_some_and(|b| b.password) {
             let dots = "•".repeat(p.input.chars().count());
-            c.text_in(text_rect, &dots, &style)
+            c.text_in(text_rect, &dots, &big)
         } else {
-            c.text_in(text_rect, &p.input, &style)
+            c.text_in(text_rect, &p.input, &big)
         };
         if self.caret_on() {
-            c.fill(Rect::new(text_rect.x + tw + 1.0, input.y + 5.0, 1.0, 16.0), self.color("input.foreground"));
+            c.fill(Rect::new(text_rect.x + tw + 1.0, input.y + (input.h - 22.0) / 2.0, 1.5, 22.0), self.color("focusBorder"));
         }
         c.pop_clip();
+        let line = if error.is_some() { self.color("inputValidation.errorBorder") } else { self.color("widget.border") };
+        c.fill(Rect::new(bx.x + 1.0, input.bottom(), bx.w - 2.0, 1.0), line);
 
-        // Result list.
-        let list_y = input.bottom() + 6.0;
+        // Results.
+        let style = TextStyle::ui(UI, self.color("quickInput.foreground"));
+        let list_y = input.bottom() + 1.0 + 6.0;
         let highlight = self.color("list.highlightForeground");
-        let desc = self.color("descriptionForeground");
         let fg = self.color("quickInput.foreground");
+        let inner = Rect::new(bx.x + 8.0, list_y, bx.w - 16.0, list_h);
         if let Some(b) = &p.input_box {
-            // An input box: the prompt, or the validation message in its box.
-            let r = Rect::new(bx.x + 6.0, list_y, bx.w - 12.0, ROW_H);
+            // An input box: the prompt, or the validation message.
             match &error {
                 Some(e) => {
                     let fg = self.color_or("inputValidation.errorForeground", "foreground");
-                    c.bordered(r, self.color("inputValidation.errorBackground"), self.color("inputValidation.errorBorder"), 1.0, 0.0);
-                    c.text_in(Rect::new(r.x + 8.0, r.y, r.w - 16.0, r.h), e, &style.color(fg));
+                    let r = Rect::new(inner.x, inner.y, inner.w, PALETTE_ROW);
+                    c.bordered(r, self.color("inputValidation.errorBackground"), self.color("inputValidation.errorBorder"), 1.0, 8.0);
+                    c.text_in(Rect::new(r.x + 10.0, r.y, r.w - 20.0, r.h), e, &style.color(fg));
                 }
                 None => {
-                    let st = style.color(self.color("quickInput.foreground"));
+                    let st = style.color(dim);
                     for (i, line) in b.prompt.lines().enumerate() {
-                        c.text_in(Rect::new(r.x + 8.0, r.y + i as f32 * ROW_H, r.w - 16.0, r.h), line, &st);
+                        c.text_in(Rect::new(inner.x + 10.0, inner.y + i as f32 * PALETTE_ROW, inner.w - 20.0, PALETTE_ROW), line, &st);
                     }
                 }
             }
@@ -4058,60 +4066,63 @@ impl Workbench {
                 None if p.is_commands() => "No matching commands",
                 None => "No matching results",
             };
-            c.text_in(Rect::new(bx.x + 16.0, list_y, bx.w - 32.0, ROW_H), msg, &style);
+            c.text_in(Rect::new(inner.x + 10.0, inner.y, inner.w - 20.0, PALETTE_ROW), msg, &style.color(dim));
         }
+        let commands = p.is_commands();
         let mut hits = Vec::new();
-        for (row, idx) in (p.scroll..(p.scroll + MAX_VISIBLE).min(p.items.len())).enumerate() {
+        let mut y = inner.y;
+        for idx in visible {
             let item = &p.items[idx];
-            let rr = Rect::new(bx.x + 6.0, list_y + row as f32 * ROW_H, bx.w - 12.0, ROW_H);
-            if idx == p.selected {
-                c.bordered(rr, self.color("quickInputList.focusBackground"), self.color("list.focusOutline"), 1.0, 3.0);
-            } else if self.hover_hit == Some(Hit::PaletteRow(idx)) {
-                c.fill_rounded(rr, self.color("list.hoverBackground"), 3.0);
-            }
             if p.starts_group(idx) {
-                // We draw the group label on the right, with a line above later groups.
-                if row > 0 {
-                    c.fill(Rect::new(rr.x, rr.y, rr.w, 1.0), self.color("pickerGroup.border"));
-                }
                 let group = item.group.as_deref().unwrap_or_default();
-                let gs = TextStyle::ui(12.0, self.color("pickerGroup.foreground"));
-                let gw = c.measure(group, &gs);
-                c.text_in(Rect::new(rr.right() - gw - 12.0, rr.y, gw + 2.0, rr.h), group, &gs);
+                let gs = TextStyle::ui(SMALL, self.color("pickerGroup.foreground")).weight(600);
+                c.text_in(Rect::new(inner.x + 10.0, y + 4.0, inner.w - 20.0, PALETTE_HEADER - 4.0), &calm(group), &gs);
+                y += PALETTE_HEADER;
+            }
+            let rr = Rect::new(inner.x, y, inner.w, PALETTE_ROW);
+            y += PALETTE_ROW;
+            if idx == p.selected {
+                c.fill_rounded(rr, self.color("quickInputList.focusBackground"), 8.0);
+            } else if self.hover_hit == Some(Hit::PaletteRow(idx)) {
+                c.fill_rounded(rr, self.color("list.hoverBackground"), 8.0);
             }
             c.push_clip(rr);
             let mut x = rr.x + 10.0;
+            let icon_y = rr.y + (rr.h - 16.0) / 2.0;
             if p.is_files() {
                 if let Action::Open(path) = &item.action {
-                    c.icon(&icons::FILE, x, rr.y + 3.0, 16.0, file_color(path));
+                    c.icon(&icons::FILE, x, icon_y, 16.0, file_color(path));
                 }
-                x += 22.0;
+                x += 24.0;
             } else if let Some(kind) = item.kind {
                 let (icon, color) = outline::symbol_icon(kind);
-                c.icon(icon, x, rr.y + 3.0, 16.0, self.theme.color(color));
-                x += 22.0;
+                c.icon(icon, x, icon_y, 16.0, self.theme.color(color));
+                x += 24.0;
             }
-            // Color the matched characters.
+            // Matched characters highlighted; a command's category ("File: ") dimmed.
+            let prefix = if commands { item.label.find(": ").map_or(0, |i| i + 2) } else { 0 };
             let spans: Vec<(usize, usize, Color)> = item
                 .label
                 .char_indices()
                 .enumerate()
-                .filter(|(ci, _)| item.matches.contains(ci))
-                .map(|(_, (bi, ch))| (bi, bi + ch.len_utf8(), highlight))
+                .map(|(ci, (bi, ch))| {
+                    let color = if item.matches.contains(&ci) { highlight } else if bi < prefix { dim } else { fg };
+                    (bi, bi + ch.len_utf8(), color)
+                })
                 .collect();
             let label_style = style.color(fg);
-            let y = rr.y + ((ROW_H - label_style.line_height) / 2.0).round();
-            let lw = c.rich_text(x, y, &item.label, &spans, &label_style);
+            let ty = rr.y + ((PALETTE_ROW - label_style.line_height) / 2.0).round();
+            let lw = c.rich_text(x, ty, &item.label, &spans, &label_style);
             if !item.detail.is_empty() {
-                let ds = TextStyle::ui(12.0, desc);
-                c.text_in(Rect::new(x + lw + 6.0, rr.y, rr.w, rr.h), &item.detail, &ds);
+                let ds = TextStyle::ui(12.0, dim);
+                c.text_in(Rect::new(x + lw + 8.0, rr.y, rr.w, rr.h), &item.detail, &ds);
             }
             if let Some(sc) = &item.shortcut {
                 let caps_w: f32 = sc
                     .iter()
                     .map(|k| if k.is_empty() { 4.0 } else { (c.measure(k, &TextStyle::ui(SMALL, fg)) + 10.0).max(20.0) + 3.0 })
                     .sum();
-                self.keycaps(c, rr.right() - caps_w - 6.0, rr.y + 1.0, sc, fg);
+                self.keycaps(c, rr.right() - caps_w - 8.0, rr.y + (rr.h - 20.0) / 2.0, sc, fg);
             }
             c.pop_clip();
             hits.push((rr, Hit::PaletteRow(idx)));

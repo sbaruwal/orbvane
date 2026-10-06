@@ -9,6 +9,7 @@ use lsp::{CompletionItem, Encoding, Severity};
 use render::{Canvas, Color, Icon, Rect, TextStyle};
 use text::{Pos, Selection};
 
+use super::controls::POPUP_RADIUS;
 use super::{Focus, Hit, Workbench, ROW_H, SMALL, UI};
 use crate::editor::{severity_color, Doc, Squiggle, font_size, line_height};
 use crate::icons;
@@ -911,8 +912,8 @@ impl Workbench {
         let y = if wy - h_total - 4.0 >= view.y { wy - h_total - 4.0 } else { wy + line_height() + 4.0 };
         let x = wx.min(self.main_rect.right() - w - 8.0).max(self.main_rect.x + 4.0);
         let r = Rect::new(x.round(), y.round(), w.round(), h_total.round());
-        c.shadow(r, 3.0, self.color("widget.shadow"));
-        c.bordered(r, self.color("editorHoverWidget.background"), self.color("editorHoverWidget.border"), 1.0, 3.0);
+        c.shadow(r, POPUP_RADIUS, self.color("widget.shadow"));
+        c.bordered(r, self.color("editorHoverWidget.background"), self.color("editorHoverWidget.border"), 1.0, POPUP_RADIUS);
         c.push_clip(r.inset(1.0, 1.0));
         draw_rows(c, &self.theme, &rows, r, r.y + pad, pad, &text_style, &code_style);
         c.pop_clip();
@@ -929,13 +930,13 @@ impl Workbench {
         let (ax, ay) = ed.point_of(doc, comp.anchor);
         let view = ed.geom.text;
         let rows = comp.shown.len().min(SUGGEST_ROWS);
-        let h = rows as f32 * ROW_H + 2.0;
+        let h = rows as f32 * ROW_H + 8.0;
         let below = ay + line_height();
         let y = if below + h <= view.bottom() || ay - h < view.y { below } else { ay - h };
         let x = (ax - 26.0).min(self.main_rect.right() - SUGGEST_W - 4.0).max(self.main_rect.x);
         let r = Rect::new(x.round(), y.round(), SUGGEST_W, h);
-        c.shadow(r, 3.0, self.color("widget.shadow"));
-        c.bordered(r, self.color("editorSuggestWidget.background"), self.color("editorSuggestWidget.border"), 1.0, 3.0);
+        c.shadow(r, POPUP_RADIUS, self.color("widget.shadow"));
+        c.bordered(r, self.color("editorSuggestWidget.background"), self.color("editorSuggestWidget.border"), 1.0, POPUP_RADIUS);
         self.hits.push((r, Hit::CompletionBox));
         let fg = self.color("editorSuggestWidget.foreground");
         let hl = self.color("editorSuggestWidget.highlightForeground");
@@ -947,11 +948,11 @@ impl Workbench {
         for (row, idx) in (comp.scroll..(comp.scroll + SUGGEST_ROWS).min(comp.shown.len())).enumerate() {
             let (item_idx, matches) = &comp.shown[idx];
             let item = &comp.items[*item_idx];
-            let rr = Rect::new(r.x + 1.0, r.y + 1.0 + row as f32 * ROW_H, r.w - 2.0, ROW_H);
+            let rr = Rect::new(r.x + 4.0, r.y + 4.0 + row as f32 * ROW_H, r.w - 8.0, ROW_H);
             if idx == comp.selected {
-                c.bordered(rr, self.color("editorSuggestWidget.selectedBackground"), self.color("focusBorder"), 1.0, 0.0);
+                c.fill_rounded(rr, self.color("editorSuggestWidget.selectedBackground"), 5.0);
             } else if self.hover_hit == Some(Hit::CompletionRow(idx)) {
-                c.fill(rr, self.color("list.hoverBackground"));
+                c.fill_rounded(rr, self.color("list.hoverBackground"), 5.0);
             }
             let (icon, color) = kind_icon(&self.theme, item.kind);
             c.icon(icon, rr.x + 6.0, rr.y + 3.0, 16.0, color);
@@ -1006,8 +1007,8 @@ impl Workbench {
         let h = (content_h + pad * 2.0).min(DETAILS_MAX_H).max(list.h.min(content_h + pad * 2.0));
         let x = if room_right >= w || room_right >= room_left { list.right() - 1.0 } else { list.x - w + 1.0 };
         let r = Rect::new(x.round(), list.y, w.round(), h.round());
-        c.shadow(r, 3.0, self.color("widget.shadow"));
-        c.bordered(r, self.color("editorSuggestWidget.background"), self.color("editorSuggestWidget.border"), 1.0, 3.0);
+        c.shadow(r, POPUP_RADIUS, self.color("widget.shadow"));
+        c.bordered(r, self.color("editorSuggestWidget.background"), self.color("editorSuggestWidget.border"), 1.0, POPUP_RADIUS);
         c.push_clip(r.inset(1.0, 1.0));
         draw_rows(c, &self.theme, &rows, r, r.y + pad, pad, &text_style, &code_style);
         c.pop_clip();
@@ -1037,7 +1038,7 @@ impl Workbench {
         let style = TextStyle::ui(UI, fg);
         let dim_style = TextStyle::ui(12.0, dim);
         if self.lsp.diagnostics.is_empty() {
-            c.text(body.x + 20.0, body.y + 4.0, "No problems have been detected in the workspace.", &style);
+            self.empty_state(c, body, &icons::PASS, "No problems", "Nothing in the workspace needs fixing.", None);
             return;
         }
         let mut rows: Vec<ProblemRow> = Vec::new();
@@ -1057,7 +1058,8 @@ impl Workbench {
             }
         }
         if rows.is_empty() {
-            c.text(body.x + 20.0, body.y + 4.0, &format!("No results found with provided filter criteria. Showing 0 of {total}."), &style);
+            let detail = format!("None of the {total} problems match the filter.");
+            self.empty_state(c, body, &icons::FILTER, "No matching problems", &detail, None);
             return;
         }
         let max = (rows.len() as f32 * ROW_H - body.h + ROW_H).max(0.0);
@@ -1072,7 +1074,7 @@ impl Workbench {
             let y = body.y + i as f32 * ROW_H - self.problems_scroll;
             let rr = Rect::new(body.x, y, body.w, ROW_H);
             if self.hover_hit == Some(Hit::ProblemRow(i)) {
-                c.fill(rr, self.color("list.hoverBackground"));
+                c.fill_rounded(super::row_pill(rr), self.color("list.hoverBackground"), super::ROW_RADIUS);
             }
             match row {
                 ProblemRow::File(path, n) => {
@@ -1081,7 +1083,7 @@ impl Workbench {
                     self.problem_files.push((i, path.clone()));
                     c.icon(&icons::FILE, rr.x + 26.0, y + 3.0, 16.0, super::file_color(path));
                     let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-                    let mut x = rr.x + 48.0 + c.text_in(Rect::new(rr.x + 48.0, y, 300.0, ROW_H), &name, &style);
+                    let mut x = rr.x + 48.0 + c.text_in(Rect::new(rr.x + 48.0, y, 300.0, ROW_H), &name, &style.weight(600));
                     let dir = path.parent().map(|p| self.display_path(p)).unwrap_or_default();
                     x += 6.0 + c.text_in(Rect::new(x + 6.0, y, 400.0, ROW_H), &dir, &dim_style);
                     self.badge(c, x + 8.0, y + 3.0, *n);
@@ -1101,7 +1103,8 @@ impl Workbench {
                         (Some(s), None) => s.clone(),
                         _ => String::new(),
                     };
-                    let loc = format!("{src}  [Ln {}, Col {}]", d.range.start.line + 1, d.range.start.character + 1);
+                    let at = format!("Ln {}, Col {}", d.range.start.line + 1, d.range.start.character + 1);
+                    let loc = if src.is_empty() { at } else { format!("{src} · {at}") };
                     c.text_in(Rect::new(x + 8.0, y, rr.w, ROW_H), &loc, &dim_style);
                     self.problem_targets.push((i, path.clone(), d.range.start));
                 }
@@ -1131,13 +1134,14 @@ impl Workbench {
         }
     }
 
-    /// A count badge (Problems tab, file rows). Returns its width.
+    /// A count badge (section headers, file rows): a quiet tint of the badge color. Returns
+    /// its width.
     pub(super) fn badge(&self, c: &mut Canvas, x: f32, y: f32, n: usize) -> f32 {
         let label = n.to_string();
-        let style = TextStyle::ui(SMALL, self.color("badge.foreground"));
+        let style = TextStyle::ui(SMALL, self.color("foreground")).weight(600);
         let w = (c.measure(&label, &style) + 10.0).max(18.0);
         let r = Rect::new(x, y, w, 16.0);
-        c.fill_rounded(r, self.color("badge.background"), 8.0);
+        c.fill_rounded(r, self.color("badge.background").with_alpha(0.25), 8.0);
         let tw = c.measure(&label, &style);
         c.text_in(Rect::new(x + (w - tw) / 2.0, y, tw + 1.0, 16.0), &label, &style);
         w

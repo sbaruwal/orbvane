@@ -51,6 +51,8 @@ Click a section to expand it.
 - **Toolbar:** the sidebar toggle; a pill with the project (click for Open Recent) and its branch
   (click for Checkout to...); the search field (Go to File, or type `>` for commands); Run; the
   panel and secondary side bar toggles; and the gear menu.
+- **Palette:** Go to File (⌘P), commands (⇧⌘P) and every picker open as one card near the top
+  of the window, with a large search line, icons, groups and each command's shortcut.
 - **Sidebar:** a row of view buttons at its top (Explorer, Search, Source Control, Run and Debug,
   Extensions, Testing, and views that extensions add), with badges for changes, test results
   and updates. Clicking the active view hides the sidebar. The Explorer is headed by the
@@ -59,6 +61,10 @@ Click a section to expand it.
   set up the Assistant. It opens at startup when nothing else does (`workbench.startupEditor`).
 - **Secondary side bar** (⌥⌘B): the Assistant, plus the Outline and Timeline of the active file.
   Drag its edge to resize it.
+- **Panel:** a rounded card under the editors with chip tabs (Problems with its count, Output,
+  Terminal); Debug Console and Test Results join them while there's something to show. Each
+  terminal is a chip of its own (split panes share one), and the Output channel is a menu on a
+  chip.
 - **Status bar:** a row of pills for sync, the language server (with its progress; click to
   restart, stop or start it, or see its output), problems and the terminal (each click shows or
   hides its panel), cursor position, indentation, encoding and language.
@@ -448,7 +454,9 @@ standard function keys").
 
 ## Settings
 
-Settings (⌘,) has a searchable editor with User and Workspace tabs. The files are
+Settings (⌘,) opens as a sheet in front of the window: the categories on the left, the settings
+grouped in cards on the right (switches for on/off ones), search and a User/Workspace switch
+at the top. Esc or a click outside closes it; the file icon opens settings.json. The files are
 `~/Library/Application Support/Orbvane/User/settings.json` and `.orbvane/settings.json`. Comments
 and formatting in them are kept when the editor changes them.
 
@@ -472,7 +480,7 @@ and formatting in them are kept when the editor changes them.
 | `assistant.permissions` | The permission mode new chats start in |
 | `update.mode` | `default`, `manual` or `none` |
 
-Every setting is listed with its description in the Settings editor.
+Every setting is listed with its description in the Settings sheet.
 
 </details>
 

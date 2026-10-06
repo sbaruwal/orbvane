@@ -475,7 +475,7 @@ impl Workbench {
         } else {
             self.color("input.border")
         };
-        c.bordered(r, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(r, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let style = TextStyle::ui(UI, self.color("input.foreground"));
         let text_r = Rect::new(r.x + 6.0, r.y, r.w - 12.0 - reserve, r.h);
         let (ph, sel) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
@@ -525,7 +525,7 @@ impl Workbench {
             } else {
                 self.color("button.background")
             };
-            c.fill_rounded(btn, bg, 2.0);
+            c.fill_rounded(btn, bg, super::controls::FIELD_RADIUS);
             let bs = TextStyle::ui(12.0, if enabled { self.color("button.foreground") } else { dim });
             let tw = c.measure("Replace All", &bs);
             c.text_in(Rect::new(btn.x + (btn.w - tw) / 2.0, btn.y, tw + 1.0, btn.h), "Replace All", &bs);

@@ -194,8 +194,8 @@ impl Workbench {
         let y = if cy - h - 4.0 >= view.y { cy - h - 4.0 } else { cy + line_height() + 4.0 };
         let x = cx.min(self.main_rect.right() - w - 8.0).max(self.main_rect.x + 4.0);
         let r = Rect::new(x.round(), y.round(), w.round(), h.round());
-        c.shadow(r, 3.0, self.color("widget.shadow"));
-        c.bordered(r, self.color("editorHoverWidget.background"), self.color("editorHoverWidget.border"), 1.0, 3.0);
+        c.shadow(r, super::controls::POPUP_RADIUS, self.color("widget.shadow"));
+        c.bordered(r, self.color("editorHoverWidget.background"), self.color("editorHoverWidget.border"), 1.0, super::controls::POPUP_RADIUS);
         c.push_clip(r.inset(1.0, 1.0));
         let mut hits = vec![(r, Hit::SignatureHelp)];
         if multi {

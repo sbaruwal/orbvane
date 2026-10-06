@@ -330,8 +330,6 @@ pub struct EditorState {
     center: bool,
     /// Set for a diff tab (read-only side-by-side comparison of this document).
     pub diff: Option<Box<crate::diff_view::DiffState>>,
-    /// The Settings editor tab (its state lives in the workbench).
-    pub settings: bool,
     /// The Welcome page's tab.
     pub welcome: bool,
     /// A preview tab: reused by the next file opened with a single click (italic title).
@@ -460,12 +458,12 @@ fn closing_pair(c: char) -> Option<char> {
 
 impl EditorState {
     pub fn new(doc: usize) -> Self {
-        Self { doc, sel: Selection::default(), scroll_y: 0.0, scroll_x: 0.0, geom: Geom::default(), reveal: false, center: false, diff: None, settings: false, welcome: false, extra: Vec::new(), word_occurrences: false, conflict_actions: Vec::new(), layout: Default::default(), folds: Default::default(), fold_controls: Vec::new(), sticky: Vec::new(), lens_hits: Vec::new(), swatch_hits: Vec::new(), peek: None, markdown: None, image: None, search: None, merge: None, preview: false }
+        Self { doc, sel: Selection::default(), scroll_y: 0.0, scroll_x: 0.0, geom: Geom::default(), reveal: false, center: false, diff: None, welcome: false, extra: Vec::new(), word_occurrences: false, conflict_actions: Vec::new(), layout: Default::default(), folds: Default::default(), fold_controls: Vec::new(), sticky: Vec::new(), lens_hits: Vec::new(), swatch_hits: Vec::new(), peek: None, markdown: None, image: None, search: None, merge: None, preview: false }
     }
 
-    /// Diff and Settings tabs aren't text editors.
+    /// Diff tabs, previews and the Welcome page aren't text editors.
     pub fn is_special(&self) -> bool {
-        self.diff.is_some() || self.settings || self.welcome || self.markdown.is_some() || self.image.is_some()
+        self.diff.is_some() || self.welcome || self.markdown.is_some() || self.image.is_some()
     }
 
     pub fn line_col(&self) -> (usize, usize) {

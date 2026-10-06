@@ -567,10 +567,9 @@ impl Workbench {
         let bx = Rect::new((x - 4.0).max(editor_rect.x), (y - 3.0).max(editor_rect.y), box_w, 28.0);
         let hint = "Enter to Rename";
         c.push_layer();
-        c.shadow(Rect::new(bx.x, bx.y, bx.w, bx.h + 20.0), 4.0, self.color("widget.shadow"));
-        c.fill(Rect::new(bx.x, bx.y, bx.w, bx.h + 20.0), self.color("editorWidget.background"));
+        self.floating(c, Rect::new(bx.x, bx.y, bx.w, bx.h + 20.0), super::controls::POPUP_RADIUS);
         let input = bx.inset(3.0, 3.0);
-        c.bordered(input, self.color("input.background"), self.color("focusBorder"), 1.0, 2.0);
+        c.bordered(input, self.color("input.background"), self.color("focusBorder"), 1.0, super::controls::FIELD_RADIUS);
         let (ph, sel, caret_on, focused) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"), self.caret_on(), self.focus == Focus::Rename);
         let fr = Rect::new(input.x + 4.0, input.y, input.w - 8.0, input.h);
         if let Some(w) = &mut self.rename {

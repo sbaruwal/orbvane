@@ -115,17 +115,19 @@ impl Workbench {
         self.output.scroll = (self.output.scroll + dy / LINE_H).max(0.0);
     }
 
-    /// The channel dropdown in the panel's title bar, right of `right`'s left edge.
+    /// The channel chip in the panel's title bar, ending at `right`; it opens a menu of channels.
     pub(super) fn draw_output_channel_picker(&mut self, c: &mut Canvas, header: Rect, right: f32) {
         let name = self.output.active.clone().unwrap_or_else(|| LANGUAGE_SERVERS.to_string());
-        let st = TextStyle::ui(12.0, self.color("settings.dropdownForeground"));
-        let w = (c.measure(&name, &st) + 32.0).clamp(120.0, 260.0);
-        let r = Rect::new(right - w, header.y + 7.0, w, 22.0);
-        c.bordered(r, self.color("settings.dropdownBackground"), self.color("settings.dropdownBorder"), 1.0, 2.0);
-        c.push_clip(Rect::new(r.x, r.y, r.w - 22.0, r.h));
-        c.text_in(Rect::new(r.x + 6.0, r.y, r.w - 28.0, r.h), &name, &st);
-        c.pop_clip();
-        c.icon(&icons::CHEVRON_DOWN, r.right() - 20.0, r.y + 3.0, 16.0, self.color("settings.dropdownForeground"));
+        let fg = self.color("foreground");
+        let st = TextStyle::ui(12.0, fg);
+        let w = (c.measure(&name, &st) + 52.0).clamp(110.0, 260.0);
+        let r = Rect::new(right - w, header.y + 6.0, w, 24.0);
+        let bg = if self.hovered(Hit::OutputChannels) { "toolbar.hoverBackground" } else { "input.background" };
+        c.fill_rounded(r, self.color(bg), 12.0);
+        let dim = self.color("descriptionForeground");
+        c.icon(&icons::LIST_SELECTION, r.x + 9.0, r.y + 5.0, 14.0, dim);
+        c.text_fit(Rect::new(r.x + 28.0, r.y, r.w - 50.0, r.h), &name, &st);
+        c.icon(&icons::CHEVRON_DOWN, r.right() - 21.0, r.y + 4.0, 16.0, dim);
         self.hits.push((r, Hit::OutputChannels));
     }
 
@@ -137,6 +139,9 @@ impl Workbench {
             .into_iter()
             .map(|n| (PopupItem::Item { label: n.clone(), enabled: true, checked: Some(n == active) }, PopupAction::OutputChannel(n)))
             .collect();
+        // Under the chip, when it was clicked.
+        let chip = self.hits.iter().find(|(_, h)| *h == Hit::OutputChannels).map(|(r, _)| *r);
+        let (x, y) = chip.map_or((x, y), |r| (r.x, r.bottom() + 4.0));
         self.show_popup(entries, x, y);
     }
 }

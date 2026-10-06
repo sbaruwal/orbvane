@@ -163,8 +163,8 @@ impl Workbench {
             let h = 10.0 + lines.len() as f32 * LINE_H + footer_h + 6.0;
             let r = Rect::new(area.right() - 10.0 - w, bottom - h, w, h);
             bottom = r.y - 8.0;
-            c.shadow(r, 8.0, self.color("widget.shadow"));
-            c.bordered(r, self.color("notifications.background"), self.color("notificationToast.border"), 1.0, 4.0);
+            c.shadow(r, super::controls::CARD_RADIUS, self.color("widget.shadow"));
+            c.bordered(r, self.color("notifications.background"), self.color("notificationToast.border"), 1.0, super::controls::CARD_RADIUS);
             self.hits.push((r, Hit::Toast(id, ToastHit::Body)));
             let (icon, color) = match severity {
                 Severity::Error => (&icons::ERROR, "notificationsErrorIcon.foreground"),
@@ -196,7 +196,7 @@ impl Workbench {
                     (false, false) => "button.secondaryBackground",
                     (false, true) => "button.secondaryHoverBackground",
                 };
-                c.bordered(b, self.color(bg), self.color_or("button.border", "contrastBorder"), 1.0, 2.0);
+                c.bordered(b, self.color(bg), self.color_or("button.border", "contrastBorder"), 1.0, super::controls::FIELD_RADIUS);
                 c.text_in(Rect::new(b.x + 11.0, b.y, bw - 22.0, b.h), label, &st);
                 self.hits.push((b, hit));
                 x -= 8.0;

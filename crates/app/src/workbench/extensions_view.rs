@@ -179,7 +179,7 @@ impl Workbench {
             _ => "INSTALLED",
         };
         let message = installed.is_empty().then(|| match filter {
-            None => "No extensions installed. Search the marketplace above, or install one from a VSIX file or a folder with the \"...\" menu.".to_string(),
+            None => "None installed yet. Search above to find one.".to_string(),
             Some("updates") => "All extensions are up to date.".to_string(),
             _ => "No extensions found.".to_string(),
         });
@@ -240,20 +240,20 @@ impl Workbench {
         } else {
             ("extensionButton.background", "extensionButton.foreground", "extensionButton.hoverBackground")
         };
-        let st = TextStyle::ui(12.0, self.color(fg));
-        let w = c.measure(label, &st) + 14.0;
+        let st = TextStyle::ui(12.0, self.color(fg)).weight(500);
+        let w = c.measure(label, &st) + 16.0;
         let r = Rect::new(x, y, w, h);
         let hovered = hit.is_some_and(|h| self.hovered(h));
         let mut bg = self.color(if hovered { hover } else { bg });
         if hit.is_none() {
             bg = bg.with_alpha(0.6);
         }
-        c.fill_rounded(r, bg, 2.0);
+        c.fill_rounded(r, bg, super::controls::FIELD_RADIUS);
         let border = self.color("extensionButton.border");
         if border.a > 0.0 && !prominent {
-            c.bordered(r, bg, border, 1.0, 2.0);
+            c.bordered(r, bg, border, 1.0, super::controls::FIELD_RADIUS);
         }
-        c.text_in(Rect::new(x + 7.0, y, w - 14.0, h), label, &st);
+        c.text_in(Rect::new(x + 8.0, y, w - 16.0, h), label, &st);
         if let Some(hit) = hit {
             self.hits.push((r, hit));
         }
@@ -290,7 +290,7 @@ impl Workbench {
         let field = Rect::new(search_r.x + 12.0, search_r.y + 5.0, search_r.w - 24.0, 24.0);
         let focused = self.focus == Focus::Extensions && self.palette.is_none();
         let border = if focused { self.color("focusBorder") } else { self.color_or("input.border", "input.background") };
-        c.bordered(field, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(field, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let caret_on = self.editor_caret_on();
         let (ifg, ph, sel) = (self.color("input.foreground"), self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
         c.push_clip(field);
@@ -372,9 +372,9 @@ impl Workbench {
         let enabled = crate::contributions::with(|r| r.is_enabled(&id));
         let hovered = [ExtHit::Row(i), ExtHit::Gear(i), ExtHit::Install(i), ExtHit::Update(i)].into_iter().any(|h| self.hovered(Hit::Ext(h)));
         if open_page == Some(id.as_str()) {
-            c.fill(row, self.color("list.inactiveSelectionBackground"));
+            c.fill_rounded(super::row_pill(row), self.color("list.inactiveSelectionBackground"), super::ROW_RADIUS);
         } else if hovered {
-            c.fill(row, self.color("list.hoverBackground"));
+            c.fill_rounded(super::row_pill(row), self.color("list.hoverBackground"), super::ROW_RADIUS);
         }
         self.hits.push((row, Hit::Ext(ExtHit::Row(i))));
         let dim_it = installed.is_some() && !enabled;
@@ -388,27 +388,7 @@ impl Workbench {
             Item::Installed(e) => (e.display_name.clone(), e.version.clone(), e.description.clone(), e.publisher.clone()),
             Item::Gallery(g) => (g.display_name.clone(), String::new(), g.description.clone(), g.publisher.clone()),
         };
-        // Installs and rating, on the right of the name (marketplace rows).
-        let mut stats_w = 0.0;
-        if let Some(g) = item.gallery().filter(|g| g.source == Source::OpenVsx) {
-            let mut sx = row.right() - 10.0;
-            if let Some(rating) = g.rating {
-                let label = format!("{rating:.1}");
-                let lw = c.measure(&label, &dim);
-                sx -= lw;
-                c.text_in(Rect::new(sx, row.y + 5.0, lw + 1.0, 18.0), &label, &dim);
-                sx -= 16.0;
-                c.icon_in(&icons::STAR_FULL, Rect::new(sx, row.y + 7.0, 14.0, 14.0), 13.0, self.color("extensionIcon.starForeground"));
-                sx -= 6.0;
-            }
-            let label = short_count(g.downloads);
-            let lw = c.measure(&label, &dim);
-            sx -= lw;
-            c.text_in(Rect::new(sx, row.y + 5.0, lw + 1.0, 18.0), &label, &dim);
-            sx -= 17.0;
-            c.icon_in(&icons::CLOUD_DOWNLOAD, Rect::new(sx, row.y + 6.0, 16.0, 16.0), 15.0, self.color("icon.foreground"));
-            stats_w = row.right() - 10.0 - sx + 6.0;
-        }
+        let stats_w = 0.0;
         c.push_clip(Rect::new(x, row.y, w, row.h));
         let name = elide(c, &name, &name_st, w - stats_w);
         let nw = c.text_in(Rect::new(x, row.y + 4.0, w - stats_w, 20.0), &name, &name_st);
@@ -424,15 +404,15 @@ impl Workbench {
         let update = self.marketplace.updates.contains_key(&id);
         let busy = self.marketplace.installing.contains(&id);
         let mut right = row.right() - 8.0;
-        let by = row.y + 39.0;
+        let by = row.y + 38.0;
         let st = TextStyle::ui(12.0, self.color("extensionButton.prominentForeground"));
         if busy {
             let label = if installed.is_some() { "Updating" } else { "Installing" };
             right -= c.measure(label, &st) + 14.0;
-            self.extension_button(c, right, by, 18.0, label, true, None);
+            self.extension_button(c, right, by, 20.0, label, false, None);
         } else if installed.is_none() {
             right -= c.measure("Install", &st) + 14.0;
-            self.extension_button(c, right, by, 18.0, "Install", true, Some(Hit::Ext(ExtHit::Install(i))));
+            self.extension_button(c, right, by, 20.0, "Install", false, Some(Hit::Ext(ExtHit::Install(i))));
         } else {
             if hovered || open_page == Some(id.as_str()) || update {
                 let gear = Rect::new(right - 22.0, row.y + 38.0, 22.0, 20.0);
@@ -441,14 +421,14 @@ impl Workbench {
             }
             if update {
                 right -= c.measure("Update", &st) + 14.0;
-                self.extension_button(c, right, by, 18.0, "Update", true, Some(Hit::Ext(ExtHit::Update(i))));
+                self.extension_button(c, right, by, 20.0, "Update", true, Some(Hit::Ext(ExtHit::Update(i))));
             }
         }
         let verified = matches!(item, Item::Gallery(g) if g.verified);
-        // Open VSX extensions: only their package.json's contributions work here.
-        let tag = match (&installed, item) {
-            (Some(e), _) if e.has_js_code() => Some("Contributions only"),
-            (None, Item::Gallery(g)) if g.source == Source::OpenVsx => Some("Open VSX"),
+        // Open VSX extensions: only their package.json's contributions work here. (Where a
+        // marketplace row comes from is on its page.)
+        let tag = match &installed {
+            Some(e) if e.has_js_code() => Some("Contributions only"),
             _ => None,
         };
         let publisher = match (&installed, enabled) {
@@ -467,7 +447,26 @@ impl Workbench {
             tw += 18.0;
         }
         if let Some(tag) = &tag {
-            c.text_in(Rect::new(x + tw + 8.0, row.y + 40.0, tag_w, 18.0), tag, &dim);
+            tw += 8.0 + c.text_in(Rect::new(x + tw + 8.0, row.y + 40.0, tag_w, 18.0), tag, &dim);
+        }
+        // Installs and rating after the publisher (marketplace rows), while there's room.
+        if let Some(g) = item.gallery().filter(|g| g.source == Source::OpenVsx) {
+            let mut sx = x + tw + 10.0;
+            let downloads = short_count(g.downloads);
+            let dw = c.measure(&downloads, &dim);
+            if sx + 16.0 + dw <= right - 6.0 {
+                c.icon_in(&icons::CLOUD_DOWNLOAD, Rect::new(sx, row.y + 41.0, 14.0, 14.0), 13.0, self.color("icon.foreground"));
+                c.text_in(Rect::new(sx + 16.0, row.y + 40.0, dw + 1.0, 18.0), &downloads, &dim);
+                sx += 16.0 + dw + 8.0;
+                if let Some(rating) = g.rating {
+                    let label = format!("{rating:.1}");
+                    let lw = c.measure(&label, &dim);
+                    if sx + 15.0 + lw <= right - 6.0 {
+                        c.icon_in(&icons::STAR_FULL, Rect::new(sx, row.y + 42.0, 13.0, 13.0), 12.0, self.color("extensionIcon.starForeground"));
+                        c.text_in(Rect::new(sx + 15.0, row.y + 40.0, lw + 1.0, 18.0), &label, &dim);
+                    }
+                }
+            }
         }
         c.pop_clip();
     }

@@ -1,30 +1,37 @@
-//! The Settings editor (⌘,): search, User/Workspace tabs, a table of contents and the list of
-//! settings with their controls, laid out.
+//! The Settings sheet (⌘,): a card in front of the window with the categories on the left and
+//! the settings on the right, grouped in cards: name and description on the left, the control
+//! on the right. Search and the User/Workspace switch sit at the top.
 
-use render::{Canvas, Rect, TextStyle};
+use render::{Canvas, Color, Rect, TextStyle};
 use serde_json::Value;
 use settings::schema::{self, Kind, Section, Setting};
 use settings::Scope;
 
+use super::controls::FIELD_RADIUS;
 use super::preferences::PopupAction;
 use super::{Focus, Hit, PopupItem, Workbench, UI};
-use crate::editor::{Doc, EditorState};
 use crate::icons;
 use crate::input::{Key, KeyInput};
 use crate::widgets::{wrap, FieldEvent, TextField};
 
-const MAX_WIDTH: f32 = 1200.0;
-const TOC_W: f32 = 180.0;
-const ROW_PAD_TOP: f32 = 12.0;
-const ROW_PAD_BOTTOM: f32 = 16.0;
-const TITLE_H: f32 = 20.0;
+const SHEET_MAX_W: f32 = 980.0;
+const SHEET_MAX_H: f32 = 780.0;
+const SHEET_RADIUS: f32 = 14.0;
+const TOC_W: f32 = 200.0;
+const TOP_H: f32 = 56.0;
+const ROW_PAD: f32 = 12.0;
+const TITLE_H: f32 = 18.0;
 const DESC_LINE_H: f32 = 18.0;
 const CONTROL_H: f32 = 26.0;
-const NUMBER_W: f32 = 200.0;
-const TEXT_W: f32 = 500.0;
+const NUMBER_W: f32 = 120.0;
+const TEXT_W: f32 = 260.0;
+const DROPDOWN_MAX_W: f32 = 240.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum SettingsHit {
+    /// Outside the sheet: closes it.
+    Backdrop,
+    Close,
     Search,
     ScopeTab(bool),
     OpenJson,
@@ -79,12 +86,15 @@ fn toc_index(section: Section) -> usize {
 
 #[derive(Clone, Copy, Debug)]
 enum Row {
+    /// `level` 1 = a top-level group, 2 = a category in it.
     Header { label: &'static str, level: u8, toc: usize },
     Setting { index: usize, toc: usize },
 }
 
 #[derive(Default)]
 pub struct SettingsView {
+    /// Whether the sheet is showing.
+    pub open: bool,
     pub search: TextField,
     workspace: bool,
     scroll: f32,
@@ -110,16 +120,24 @@ impl SettingsView {
         if !query.is_empty() {
             let modified_only = query.split_whitespace().any(|w| w == "@modified");
             let words: Vec<&str> = query.split_whitespace().filter(|w| *w != "@modified").collect();
-            return all
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| {
-                    let (cat, name) = s.title();
-                    let hay = format!("{} {cat}{name} {}", s.key, s.description).to_lowercase();
-                    words.iter().all(|w| hay.contains(w)) && (!modified_only || modified(s.key))
-                })
-                .map(|(index, s)| Row::Setting { index, toc: toc_index(s.section) })
-                .collect();
+            let toc = toc();
+            let mut rows = Vec::new();
+            let mut last = None;
+            let found = all.iter().enumerate().filter(|(_, s)| {
+                let (cat, name) = s.title();
+                let hay = format!("{} {cat}{name} {}", s.key, s.description).to_lowercase();
+                words.iter().all(|w| hay.contains(w)) && (!modified_only || modified(s.key))
+            });
+            // Results keep their categories as headings.
+            for (index, s) in found {
+                let t = toc_index(s.section);
+                if last != Some(t) {
+                    rows.push(Row::Header { label: toc[t].0, level: 2, toc: t });
+                    last = Some(t);
+                }
+                rows.push(Row::Setting { index, toc: t });
+            }
+            return rows;
         }
         let mut rows = vec![Row::Header { label: "Commonly Used", level: 1, toc: 0 }];
         for key in schema::COMMONLY_USED {
@@ -199,31 +217,20 @@ fn validate_number(text: &str, kind: Kind) -> Result<Value, String> {
 }
 
 impl Workbench {
-    /// Opens (or focuses) the Settings editor, with the search box focused.
+    /// Shows the Settings sheet, with the search box focused.
     pub(super) fn open_settings_ui(&mut self) {
-        let existing = self
-            .groups
-            .iter()
-            .enumerate()
-            .find_map(|(g, gr)| gr.tabs.iter().position(|t| t.settings).map(|i| (g, i)));
-        match existing {
-            Some((g, i)) => {
-                self.active_group = g;
-                self.groups[g].active = i;
-            }
-            None => {
-                let doc = self.add_doc(Doc::virtual_named("Settings"));
-                let g = &mut self.groups[self.active_group];
-                let at = if g.tabs.is_empty() { 0 } else { g.active + 1 };
-                let mut ed = EditorState::new(doc);
-                ed.settings = true;
-                g.tabs.insert(at, ed);
-                g.active = at;
-            }
-        }
+        self.settings_ui.open = true;
         self.settings_ui.editing = None;
         self.settings_ui.search.select_all();
         self.focus = Focus::Settings;
+    }
+
+    /// Closes the sheet, keeping what was typed into a field.
+    pub(super) fn close_settings_ui(&mut self) {
+        self.commit_editing();
+        self.settings_ui.editing = None;
+        self.settings_ui.open = false;
+        self.focus = Focus::Editor;
     }
 
     /// The value shown for a setting in the selected scope: its own, else inherited.
@@ -291,6 +298,7 @@ impl Workbench {
                 self.settings_ui.search.set_text("");
                 self.settings_ui.scroll = 0.0;
             }
+            Key::Escape => self.close_settings_ui(),
             Key::PageDown => self.settings_ui.scroll += self.settings_ui.view_h * 0.9,
             Key::PageUp => self.settings_ui.scroll -= self.settings_ui.view_h * 0.9,
             Key::Down if !k.cmd => self.settings_ui.scroll += 40.0,
@@ -346,10 +354,12 @@ impl Workbench {
             self.settings_ui.editing = None;
         }
         match hit {
+            SettingsHit::Backdrop | SettingsHit::Close => self.close_settings_ui(),
             SettingsHit::Search => self.settings_ui.search.click(x, shift),
             SettingsHit::ScopeTab(ws) => self.settings_ui.workspace = ws,
             SettingsHit::OpenJson => {
                 let scope = self.settings_ui.scope();
+                self.close_settings_ui();
                 self.open_settings_json(scope);
             }
             SettingsHit::Toc(i) => {
@@ -429,33 +439,77 @@ impl Workbench {
 
     // ------------------------------------------------------------------ drawing
 
-    pub(super) fn draw_settings_editor(&mut self, c: &mut Canvas, r: Rect, focused: bool) {
-        c.fill(r, self.color("editor.background"));
-        self.hits.push((r, Hit::Settings(SettingsHit::Body)));
+    /// The sheet over a dimmed window; a click outside it closes it.
+    pub(super) fn draw_settings_sheet(&mut self, c: &mut Canvas, full: Rect) {
+        c.push_layer();
+        c.fill(full, self.color("widget.shadow").with_alpha(0.45));
+        self.hits.push((full, Hit::Settings(SettingsHit::Backdrop)));
+        let w = (full.w - 80.0).clamp(320.0, SHEET_MAX_W).min(full.w - 16.0);
+        let h = (full.h - 96.0).clamp(240.0, SHEET_MAX_H).min(full.h - 16.0);
+        let sheet = Rect::new((full.x + (full.w - w) / 2.0).round(), (full.y + (full.h - h) / 2.0).round(), w, h);
+        c.shadow(sheet, SHEET_RADIUS, self.color("widget.shadow"));
+        c.fill_rounded(sheet, self.color("editor.background"), SHEET_RADIUS);
+        self.hits.push((sheet, Hit::Settings(SettingsHit::Body)));
+        let focused = self.focus == Focus::Settings && self.palette.is_none();
+        c.push_clip(sheet);
+        self.draw_settings_editor(c, sheet, focused);
+        c.pop_clip();
+        let border = self.color_or("editorWidget.border", "widget.border");
+        c.bordered(sheet, Color::TRANSPARENT, border, 1.0, SHEET_RADIUS);
+    }
+
+    fn draw_settings_editor(&mut self, c: &mut Canvas, r: Rect, focused: bool) {
         let has_workspace = self.settings.path(Scope::Workspace).is_some();
         if !has_workspace {
             self.settings_ui.workspace = false;
         }
-        let w = (r.w - 48.0).min(MAX_WIDTH);
-        let content = Rect::new(r.x + ((r.w - w) / 2.0).max(24.0).round(), r.y, w, r.h);
         let caret_on = self.caret_on();
         let fg = self.color("foreground");
         let desc_fg = self.color("descriptionForeground");
-
-        // Search box.
-        let search_r = Rect::new(content.x, content.y + 12.0, content.w, 28.0);
-        let search_focused = focused && self.settings_ui.editing.is_none();
-        let border = if search_focused { self.color("focusBorder") } else { self.color_or("input.border", "input.background") };
-        c.bordered(search_r, self.color("input.background"), border, 1.0, 2.0);
+        let border = self.color("widget.border");
         let scope = self.settings_ui.scope();
         let rows = self.settings_ui.rows(&|key| self.settings.get_in(scope, key).is_some());
         let query_active = !self.settings_ui.search.text.trim().is_empty();
+
+        // The categories down the left, on the side bar's color.
+        let show_toc = r.w >= 640.0;
+        let main = if show_toc {
+            c.fill_rounded(Rect::new(r.x, r.y, TOC_W + SHEET_RADIUS * 2.0, r.h), self.color("sideBar.background"), SHEET_RADIUS);
+            c.fill(Rect::new(r.x + TOC_W, r.y, SHEET_RADIUS * 2.0, r.h), self.color("editor.background"));
+            c.fill(Rect::new(r.x + TOC_W, r.y, 1.0, r.h), border);
+            let st = TextStyle::ui(15.0, fg).weight(600);
+            c.text_in(Rect::new(r.x + 20.0, r.y, TOC_W - 40.0, TOP_H), "Settings", &st);
+            Rect::new(r.x + TOC_W + 1.0, r.y, r.w - TOC_W - 1.0, r.h)
+        } else {
+            r
+        };
+
+        // The top bar: search, User/Workspace, settings.json and close.
+        let top = Rect::new(main.x, main.y, main.w, TOP_H);
+        let close = Rect::new(top.right() - 16.0 - 26.0, top.y + 15.0, 26.0, 26.0);
+        let icon_fg = self.color("icon.foreground");
+        self.icon_button(c, close, &icons::CLOSE, Hit::Settings(SettingsHit::Close), icon_fg);
+        let json = Rect::new(close.x - 30.0, close.y, 26.0, 26.0);
+        self.icon_button(c, json, &icons::GO_TO_FILE, Hit::Settings(SettingsHit::OpenJson), icon_fg);
+        let mut right = json.x - 10.0;
+        if has_workspace {
+            let st = TextStyle::ui(UI, fg);
+            let seg_w = c.measure("User", &st) + c.measure("Workspace", &st) + 48.0 + 4.0;
+            right -= seg_w;
+            let active = self.settings_ui.workspace as usize;
+            self.segmented(c, right, top.y + 14.0, 28.0, &["User", "Workspace"], active, |i| Hit::Settings(SettingsHit::ScopeTab(i == 1)));
+            right -= 12.0;
+        }
+        let search_r = Rect::new(top.x + 24.0, top.y + 14.0, (right - top.x - 24.0).max(80.0), 28.0);
+        let search_focused = focused && self.settings_ui.editing.is_none();
+        self.field_frame(c, search_r, search_focused);
+        c.icon(&icons::SEARCH, search_r.x + 9.0, search_r.y + 7.0, 14.0, desc_fg);
         let count_w = if query_active {
             let n = rows.iter().filter(|r| matches!(r, Row::Setting { .. })).count();
             let label = match n {
-                0 => "No Settings Found".to_string(),
-                1 => "1 Setting Found".to_string(),
-                n => format!("{n} Settings Found"),
+                0 => "None found".to_string(),
+                1 => "1 setting".to_string(),
+                n => format!("{n} settings"),
             };
             let st = TextStyle::ui(12.0, desc_fg);
             let lw = c.measure(&label, &st);
@@ -466,150 +520,173 @@ impl Workbench {
         };
         let style = TextStyle::ui(UI, self.color("input.foreground"));
         let (ph, sel) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
-        let field_r = Rect::new(search_r.x + 8.0, search_r.y, search_r.w - 16.0 - count_w, search_r.h);
+        let field_r = Rect::new(search_r.x + 28.0, search_r.y, (search_r.w - 36.0 - count_w).max(0.0), search_r.h);
         self.settings_ui.search.draw(c, field_r, &style, "Search settings", ph, search_focused, caret_on, sel);
         self.hits.push((search_r, Hit::Settings(SettingsHit::Search)));
 
-        // User / Workspace tabs.
-        let tabs_y = search_r.bottom() + 10.0;
-        let tabs_h = 30.0;
-        let mut x = content.x;
-        let tabs: &[(&str, bool)] = if has_workspace { &[("User", false), ("Workspace", true)] } else { &[("User", false)] };
-        for (label, ws) in tabs {
-            let active = self.settings_ui.workspace == *ws;
-            let hit = Hit::Settings(SettingsHit::ScopeTab(*ws));
-            let color = if active || self.hovered(hit) { self.color("panelTitle.activeForeground") } else { self.color("panelTitle.inactiveForeground") };
-            let st = TextStyle::ui(UI, color);
-            let lw = c.measure(label, &st);
-            let tab = Rect::new(x, tabs_y, lw + 16.0, tabs_h);
-            c.text_in(Rect::new(x + 8.0, tabs_y, lw + 2.0, tabs_h), label, &st);
-            if active {
-                c.fill(Rect::new(x + 8.0, tab.bottom() - 2.0, lw, 1.0), self.color("panelTitle.activeBorder"));
-            }
-            self.hits.push((tab, hit));
-            x += tab.w + 4.0;
-        }
-        let json_btn = Rect::new(content.right() - 26.0, tabs_y + 4.0, 22.0, 22.0);
-        let icon_fg = self.color("icon.foreground");
-        self.icon_button(c, json_btn, &icons::GO_TO_FILE, Hit::Settings(SettingsHit::OpenJson), icon_fg);
-        let header_bottom = tabs_y + tabs_h;
-        c.fill(Rect::new(content.x, header_bottom, content.w, 1.0), self.color("settings.headerBorder"));
-
-        // Body: table of contents and the settings list.
-        let body = Rect::new(r.x, header_bottom + 1.0, r.w, r.bottom() - header_bottom - 1.0);
-        let show_toc = content.w >= 700.0;
-        let list_x = if show_toc { content.x + TOC_W + 24.0 } else { content.x };
-        let list_w = content.right() - list_x;
+        // Body: the settings, grouped in cards under their headings.
+        let body = Rect::new(main.x, top.bottom(), main.w, main.bottom() - top.bottom());
+        let list_x = body.x + 24.0;
+        let list_w = (body.w - 48.0).max(100.0);
+        let content_x = list_x + 16.0;
+        let content_w = list_w - 32.0;
         self.settings_ui.view_h = body.h;
 
         // Lay out rows (heights depend on wrapped descriptions).
         let all = schema::all();
-        let desc_style = TextStyle::ui(UI, fg.with_alpha(0.9));
-        let text_w = (list_w - 28.0).max(100.0);
-        let mut layout: Vec<(Row, f32, f32, Vec<String>)> = Vec::with_capacity(rows.len());
-        let mut y = 0.0;
+        let desc_style = TextStyle::ui(UI, desc_fg);
+        let mut layout: Vec<Laid> = Vec::with_capacity(rows.len());
+        let mut cards: Vec<(f32, f32)> = Vec::new();
+        let mut y = 4.0;
         let mut anchors = Vec::new();
+        let mut in_card = false;
         for row in rows {
-            let (h, lines) = match row {
-                Row::Header { level, toc, .. } => {
-                    if !anchors.iter().any(|(t, _)| *t == toc) {
-                        anchors.push((toc, y));
+            let toc = match row {
+                Row::Header { toc, .. } | Row::Setting { toc, .. } => toc,
+            };
+            if !anchors.iter().any(|(t, _)| *t == toc) {
+                anchors.push((toc, y));
+            }
+            match row {
+                Row::Header { level, .. } => {
+                    if in_card {
+                        y += 8.0;
+                        in_card = false;
                     }
-                    (if level == 1 { 48.0 } else { 38.0 }, Vec::new())
+                    let h = if level == 1 { 46.0 } else { 34.0 };
+                    layout.push(Laid { row, y, h, lines: Vec::new(), first: false });
+                    y += h;
                 }
-                Row::Setting { index, toc } => {
-                    if !anchors.iter().any(|(t, _)| *t == toc) {
-                        anchors.push((toc, y));
-                    }
+                Row::Setting { index, .. } => {
                     let s = &all[index];
+                    let control_w = self.control_width(c, s);
+                    let text_w = (content_w - control_w - 24.0).max(120.0);
                     let desc = plain_description(s);
-                    let is_bool = matches!(s.kind, Kind::Bool);
-                    let lines = wrap(c, &desc, &desc_style, if is_bool { text_w - 26.0 } else { text_w });
+                    let lines = if desc.is_empty() { Vec::new() } else { wrap(c, &desc, &desc_style, text_w) };
                     let error = self.settings_ui.editing.as_ref().filter(|(i, _)| *i == index).and_then(|(_, f)| match s.kind {
                         Kind::Number { .. } => validate_number(&f.text, s.kind).err(),
                         _ => None,
                     });
-                    let h = if is_bool {
-                        ROW_PAD_TOP + TITLE_H + 6.0 + (lines.len() as f32 * DESC_LINE_H).max(18.0) + ROW_PAD_BOTTOM
-                    } else {
-                        ROW_PAD_TOP + TITLE_H + 4.0 + lines.len() as f32 * DESC_LINE_H + 8.0 + CONTROL_H + if error.is_some() { 24.0 } else { 0.0 } + ROW_PAD_BOTTOM
-                    };
-                    (h, lines)
+                    let text_h = TITLE_H + if lines.is_empty() { 0.0 } else { 4.0 + lines.len() as f32 * DESC_LINE_H } + if error.is_some() { 20.0 } else { 0.0 };
+                    let h = ROW_PAD * 2.0 + text_h.max(CONTROL_H);
+                    if !in_card {
+                        cards.push((y, 0.0));
+                    }
+                    layout.push(Laid { row, y, h, lines, first: !in_card });
+                    in_card = true;
+                    y += h;
+                    if let Some(card) = cards.last_mut() {
+                        card.1 = y;
+                    }
                 }
-            };
-            layout.push((row, y, h, lines));
-            y += h;
+            }
         }
+        y += 24.0;
         self.settings_ui.content_h = y;
-        let max_scroll = (y - body.h * 0.5).max(0.0);
+        let max_scroll = (y - body.h).max(0.0);
         self.settings_ui.scroll = self.settings_ui.scroll.clamp(0.0, max_scroll);
         let scroll = self.settings_ui.scroll;
         self.settings_ui.current_toc = anchors.iter().rev().find(|(_, ay)| *ay <= scroll + 1.0).map_or(0, |(t, _)| *t);
         self.settings_ui.anchors = anchors;
 
         if show_toc {
-            self.draw_settings_toc(c, Rect::new(content.x, body.y + 12.0, TOC_W, body.h - 12.0), &layout);
+            self.draw_settings_toc(c, Rect::new(r.x, r.y + TOP_H, TOC_W, r.h - TOP_H - 8.0), &layout);
         }
 
-        let list = Rect::new(list_x - 26.0, body.y, list_w + 26.0, body.h);
-        c.push_clip(list);
+        c.push_clip(body);
+        for (y0, y1) in &cards {
+            let card = Rect::new(list_x, body.y + y0 - scroll, list_w, y1 - y0);
+            if card.y < body.bottom() && card.bottom() > body.y {
+                self.card(c, card);
+            }
+        }
         let hover_hit = self.hover_hit;
-        for (row, ry, h, lines) in &layout {
-            let top = body.y + ry - scroll;
-            if top > body.bottom() || top + h < body.y {
+        for laid in &layout {
+            let top = body.y + laid.y - scroll;
+            if top > body.bottom() || top + laid.h < body.y {
                 continue;
             }
-            match *row {
+            match laid.row {
                 Row::Header { label, level, .. } => {
-                    let size = if level == 1 { 20.0 } else { 16.0 };
-                    let st = TextStyle::ui(size, self.color("settings.headerForeground")).weight(600);
-                    c.text(list_x, top + if level == 1 { 16.0 } else { 12.0 }, label, &st);
+                    let st = if level == 1 {
+                        TextStyle::ui(17.0, self.color("settings.headerForeground")).weight(600)
+                    } else {
+                        TextStyle::ui(UI, fg).weight(600)
+                    };
+                    c.text_in(Rect::new(list_x + 4.0, top + laid.h - 30.0, list_w - 8.0, 26.0), label, &st);
                 }
                 Row::Setting { index, .. } => {
-                    let row_r = Rect::new(list_x - 26.0, top, list_w + 26.0, *h);
-                    self.draw_setting_row(c, index, row_r, list_x, text_w, lines, focused, caret_on, hover_hit);
+                    let row_r = Rect::new(list_x, top, list_w, laid.h);
+                    if !laid.first {
+                        c.fill(Rect::new(content_x, top, content_w, 1.0), border.with_alpha(border.a * 0.7));
+                    }
+                    self.draw_setting_row(c, index, row_r, content_x, content_w, &laid.lines, focused, caret_on, hover_hit);
                 }
             }
         }
-        if layout.iter().all(|(r, ..)| !matches!(r, Row::Setting { .. })) {
-            let st = TextStyle::ui(UI, desc_fg);
-            c.text(list_x, body.y + 16.0, "No Settings Found", &st);
+        if !layout.iter().any(|l| matches!(l.row, Row::Setting { .. })) {
+            let detail = "Try other words, or @modified for the settings you've changed.";
+            self.empty_state(c, body, &icons::SEARCH, "No settings found", detail, None);
         }
         c.pop_clip();
 
-        // Shadow under the header once scrolled.
+        // A line under the top bar, and a shadow once scrolled.
+        c.fill(Rect::new(main.x, body.y, main.w, 1.0), self.color("settings.headerBorder"));
         if scroll > 0.0 {
-            for i in 0..3 {
-                let a = 0.3 * (1.0 - i as f32 / 3.0);
-                c.fill(Rect::new(r.x, body.y + i as f32, r.w, 1.0), self.color("scrollbar.shadow").with_alpha(a));
+            for i in 1..4 {
+                let a = 0.3 * (1.0 - i as f32 / 4.0);
+                c.fill(Rect::new(main.x, body.y + i as f32, main.w, 1.0), self.color("scrollbar.shadow").with_alpha(a));
             }
         }
     }
 
-    fn draw_settings_toc(&mut self, c: &mut Canvas, r: Rect, layout: &[(Row, f32, f32, Vec<String>)]) {
+    /// How wide a setting's control is drawn.
+    fn control_width(&self, c: &mut Canvas, s: &Setting) -> f32 {
+        match s.kind {
+            Kind::Bool => 32.0,
+            Kind::Enum(_) | Kind::Theme => {
+                let st = TextStyle::ui(UI, self.color("settings.dropdownForeground"));
+                let label = value_label(&self.shown_value(s));
+                let widest = match s.kind {
+                    Kind::Enum(o) => o.iter().map(|(v, _)| c.measure(v, &st)).fold(0.0, f32::max),
+                    _ => 0.0,
+                };
+                (widest.max(c.measure(&label, &st)) + 36.0).clamp(120.0, DROPDOWN_MAX_W)
+            }
+            Kind::Number { .. } => NUMBER_W,
+            Kind::String => TEXT_W,
+            Kind::Json(_) => c.measure(JSON_LINK, &TextStyle::ui(UI, Color::TRANSPARENT)),
+        }
+    }
+
+    fn draw_settings_toc(&mut self, c: &mut Canvas, r: Rect, layout: &[Laid]) {
         let searching = !self.settings_ui.search.text.trim().is_empty();
+        c.push_clip(r);
         let mut y = r.y;
         for (i, (label, level, _)) in toc().into_iter().enumerate() {
-            let (label, level) = (&label, &level);
-            let count = layout.iter().filter(|(row, ..)| matches!(row, Row::Setting { toc, .. } if *toc == i)).count();
+            let count = layout.iter().filter(|l| matches!(l.row, Row::Setting { toc, .. } if toc == i)).count();
             if searching && count == 0 {
                 continue;
             }
             let active = self.settings_ui.current_toc == i;
             let hit = Hit::Settings(SettingsHit::Toc(i));
-            let rr = Rect::new(r.x, y, r.w, 22.0);
-            if self.hovered(hit) {
-                c.fill(rr, self.color("list.hoverBackground"));
+            let rr = Rect::new(r.x + 6.0, y, r.w - 12.0, 26.0);
+            if active {
+                c.fill_rounded(rr, self.color("list.inactiveSelectionBackground"), super::ROW_RADIUS);
+            } else if self.hovered(hit) {
+                c.fill_rounded(rr, self.color("list.hoverBackground"), super::ROW_RADIUS);
             }
-            let color = if active { self.color("settings.headerForeground") } else { self.color("foreground").with_alpha(0.8) };
-            let st = TextStyle::ui(UI, color).weight(if active { 600 } else { 400 });
+            let color = if active || level == 0 { self.color("foreground") } else { self.color("foreground").with_alpha(0.8) };
+            let st = TextStyle::ui(UI, color).weight(if level == 0 || active { 600 } else { 400 });
             let text = if searching { format!("{label} ({count})") } else { label.to_string() };
-            c.text_in(Rect::new(rr.x + 8.0 + *level as f32 * 12.0, rr.y, rr.w - 8.0, rr.h), &text, &st);
-            self.hits.push((rr, hit));
-            y += 22.0;
+            c.text_in(Rect::new(rr.x + 10.0 + level as f32 * 12.0, rr.y, rr.w - 16.0 - level as f32 * 12.0, rr.h), &text, &st);
+            self.hits.push((rr.intersect(&r), hit));
+            y += 26.0;
         }
+        c.pop_clip();
     }
 
+    /// One setting: its name and description on the left, its control on the right.
     #[allow(clippy::too_many_arguments)]
     fn draw_setting_row(
         &mut self,
@@ -617,7 +694,7 @@ impl Workbench {
         index: usize,
         row_r: Rect,
         x: f32,
-        text_w: f32,
+        content_w: f32,
         lines: &[String],
         focused: bool,
         caret_on: bool,
@@ -629,89 +706,74 @@ impl Workbench {
         let editing = self.settings_ui.editing.as_ref().is_some_and(|(i, _)| *i == index);
         let row_hovered = matches!(hover_hit, Some(Hit::Settings(h)) if matches!(h,
             SettingsHit::Row(i) | SettingsHit::Gear(i) | SettingsHit::Checkbox(i) | SettingsHit::Dropdown(i) | SettingsHit::Input(i) if i == index));
+        let pill = Rect::new(row_r.x + 4.0, row_r.y + 3.0, row_r.w - 8.0, row_r.h - 6.0);
         if editing && focused {
-            c.fill(row_r, self.color("settings.focusedRowBackground"));
+            c.fill_rounded(pill, self.color("settings.focusedRowBackground"), 8.0);
         } else if row_hovered {
-            c.fill(row_r, self.color("settings.rowHoverBackground"));
+            c.fill_rounded(pill, self.color("settings.rowHoverBackground"), 8.0);
         }
         self.hits.push((row_r, Hit::Settings(SettingsHit::Row(index))));
 
         let modified_here = self.settings.get_in(scope, s.key).is_some();
         let modified_other = self.settings.path(other).is_some() && self.settings.get_in(other, s.key).is_some();
-        let content_bottom = row_r.bottom() - ROW_PAD_BOTTOM + 4.0;
+        let ty = row_r.y + ROW_PAD;
         if modified_here {
-            c.fill(Rect::new(x - 8.0, row_r.y + ROW_PAD_TOP, 2.0, content_bottom - row_r.y - ROW_PAD_TOP), self.color("settings.modifiedItemIndicator"));
+            let h = TITLE_H + if lines.is_empty() { 0.0 } else { 4.0 + lines.len() as f32 * DESC_LINE_H };
+            c.fill_rounded(Rect::new(row_r.x + 6.0, ty, 2.0, h), self.color("settings.modifiedItemIndicator"), 1.0);
         }
 
-        // Title: "Editor: " + "Font Size", both bold, and where else it's modified.
-        let fg = self.color("foreground");
-        let (cat, name) = s.title();
+        // The control, on the right, level with the name.
+        let control_w = self.control_width(c, s);
+        let cx = x + content_w - control_w;
+        let cy = ty + (TITLE_H - CONTROL_H) / 2.0;
+        let text_w = (content_w - control_w - 24.0).max(120.0);
+
+        // Name (no category: the heading says it), where else it's set, and the gear on hover.
+        let (_, name) = s.title();
         let title_style = TextStyle::ui(UI, self.color("settings.headerForeground")).weight(600);
-        let ty = row_r.y + ROW_PAD_TOP;
-        let cw = c.text(x, ty, &cat, &title_style.color(fg.with_alpha(0.9)));
-        let nw = c.text(x + cw, ty, &name, &title_style);
+        let mut tx = x + c.text_in(Rect::new(x, ty, text_w, TITLE_H), &name, &title_style);
         if modified_other {
-            let label = if modified_here { "Also modified in: " } else { "Modified in: " };
+            let label = if modified_here { "Also set in " } else { "Set in " };
             let where_ = if other == Scope::Workspace { "Workspace" } else { "User" };
             let st = TextStyle::ui(12.0, self.color("descriptionForeground"));
-            let lw = c.text(x + cw + nw + 12.0, ty + 1.0, label, &st);
-            c.text(x + cw + nw + 12.0 + lw, ty + 1.0, where_, &st.color(self.color("textLink.foreground")));
+            tx += 10.0;
+            let lw = c.text_in(Rect::new(tx, ty, 200.0, TITLE_H), label, &st);
+            tx += lw + c.text_in(Rect::new(tx + lw, ty, 100.0, TITLE_H), where_, &st.color(self.color("textLink.foreground")));
         }
-        // The gear appears on hover, left of the title.
-        let gear = Rect::new(x - 26.0 + 2.0, ty, 20.0, 20.0);
-        if row_hovered || modified_here {
+        if row_hovered {
             let hit = Hit::Settings(SettingsHit::Gear(index));
             let color = if self.hovered(hit) { self.color("icon.foreground") } else { self.color("icon.foreground").with_alpha(0.7) };
-            if row_hovered {
-                self.icon_button(c, gear, &icons::GEAR, hit, color);
-            }
+            self.icon_button(c, Rect::new(tx + 6.0, ty - 1.0, 20.0, 20.0), &icons::GEAR, hit, color);
         }
 
-        let desc_style = TextStyle::ui(UI, fg.with_alpha(0.9));
-        let value = self.shown_value(s);
+        let desc_style = TextStyle::ui(UI, self.color("descriptionForeground"));
         let mut y = ty + TITLE_H + 4.0;
-        if let Kind::Bool = s.kind {
-            // Checkbox with the description beside it.
-            let bx = Rect::new(x, y + 1.0, 18.0, 18.0);
-            let hit = Hit::Settings(SettingsHit::Checkbox(index));
-            c.bordered(bx, self.color("settings.checkboxBackground"), self.color("settings.checkboxBorder"), 1.0, 3.0);
-            if value.as_bool() == Some(true) {
-                c.icon_in(&icons::CHECK, bx, 14.0, self.color("settings.checkboxForeground"));
-            }
-            self.hits.push((bx, hit));
-            for (i, line) in lines.iter().enumerate() {
-                c.text(x + 26.0, y + i as f32 * DESC_LINE_H + 1.0, line, &desc_style);
-            }
-            // The description is clickable too, like a label.
-            let label_w = lines.iter().map(|l| c.measure(l, &desc_style)).fold(0.0, f32::max);
-            self.hits.push((Rect::new(x + 26.0, y, label_w, lines.len() as f32 * DESC_LINE_H), hit));
-            return;
-        }
         for line in lines {
             c.text(x, y, line, &desc_style);
             y += DESC_LINE_H;
         }
-        y += 8.0;
+        let value = self.shown_value(s);
         match s.kind {
+            Kind::Bool => {
+                let hit = Hit::Settings(SettingsHit::Checkbox(index));
+                self.switch(c, cx, ty, value.as_bool() == Some(true), hit);
+                // The name and description toggle it too, like a label.
+                let label_h = y - ty;
+                self.hits.push((Rect::new(x, ty, text_w, label_h), hit));
+            }
             Kind::Enum(_) | Kind::Theme => {
                 let label = value_label(&value);
-                let options: Vec<String> = match s.kind {
-                    Kind::Enum(o) => o.iter().map(|(v, _)| v.to_string()).collect(),
-                    _ => vec![label.clone()],
-                };
                 let st = TextStyle::ui(UI, self.color("settings.dropdownForeground"));
-                let widest = options.iter().map(|o| c.measure(o, &st)).fold(0.0, f32::max).max(c.measure(&label, &st));
-                let dd = Rect::new(x, y, (widest + 36.0).max(120.0).min(text_w), CONTROL_H);
+                let dd = Rect::new(cx, cy, control_w, CONTROL_H);
                 let hit = Hit::Settings(SettingsHit::Dropdown(index));
-                c.bordered(dd, self.color("settings.dropdownBackground"), self.color("settings.dropdownBorder"), 1.0, 2.0);
-                c.text_in(Rect::new(dd.x + 8.0, dd.y, dd.w - 30.0, dd.h), &label, &st);
+                c.bordered(dd, self.color("settings.dropdownBackground"), self.color("settings.dropdownBorder"), 1.0, FIELD_RADIUS);
+                c.text_fit(Rect::new(dd.x + 9.0, dd.y, dd.w - 32.0, dd.h), &label, &st);
                 c.icon(&icons::CHEVRON_DOWN, dd.right() - 22.0, dd.y + 5.0, 16.0, self.color("settings.dropdownForeground"));
                 self.hits.push((dd, hit));
             }
             Kind::Number { .. } | Kind::String => {
                 let number = matches!(s.kind, Kind::Number { .. });
-                let w = if number { NUMBER_W } else { TEXT_W.min(text_w) };
-                let input = Rect::new(x, y, w, CONTROL_H);
+                let input = Rect::new(cx, cy, control_w, CONTROL_H);
                 let (bg, border) = if number {
                     ("settings.numberInputBackground", "settings.numberInputBorder")
                 } else {
@@ -725,11 +787,11 @@ impl Workbench {
                 } else if editing && focused {
                     self.color("focusBorder")
                 } else {
-                    self.color_or(border, bg)
+                    self.color_or(border, "widget.border")
                 };
-                c.bordered(input, self.color(bg), border_color, 1.0, 2.0);
+                c.bordered(input, self.color(bg), border_color, 1.0, FIELD_RADIUS);
                 let st = TextStyle::ui(UI, self.color("input.foreground"));
-                let field_r = Rect::new(input.x + 6.0, input.y, input.w - 12.0, input.h);
+                let field_r = Self::field_text_rect(input);
                 let (ph, sel) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
                 match &mut self.settings_ui.editing {
                     Some((i, field)) if *i == index => field.draw(c, field_r, &st, "", ph, focused, caret_on, sel),
@@ -742,28 +804,36 @@ impl Workbench {
                 self.hits.push((input, Hit::Settings(SettingsHit::Input(index))));
                 if let Some(msg) = error {
                     let st = TextStyle::ui(12.0, self.color("errorForeground"));
-                    c.text(x, input.bottom() + 4.0, &msg, &st);
+                    c.text(x, y + 2.0, &msg, &st);
                 }
             }
             Kind::Json(_) => {
                 // Lists and objects are edited in the file.
                 let st = TextStyle::ui(UI, self.color("textLink.foreground"));
-                let label = "Edit in settings.json";
-                let w = c.measure(label, &st);
-                let r = Rect::new(x, y, w, CONTROL_H);
-                c.text_in(r, label, &st);
+                let r = Rect::new(cx, cy, control_w + 2.0, CONTROL_H);
+                c.text_in(r, JSON_LINK, &st);
                 self.hits.push((r, Hit::Settings(SettingsHit::OpenJson)));
             }
-            Kind::Bool => {}
         }
     }
 
-    /// Whether the Settings editor is the active tab of the active group.
+    /// Whether the Settings sheet is showing.
     pub(super) fn settings_active(&self) -> bool {
-        self.active_editor().is_some_and(|e| e.settings)
+        self.settings_ui.open
     }
 
     pub(super) fn settings_caret_visible(&self) -> bool {
         self.focus == Focus::Settings && self.settings_active()
     }
 }
+
+/// A laid out row: its content y, height, wrapped description, and whether it starts a card.
+struct Laid {
+    row: Row,
+    y: f32,
+    h: f32,
+    lines: Vec<String>,
+    first: bool,
+}
+
+const JSON_LINK: &str = "Edit in settings.json";

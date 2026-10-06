@@ -465,7 +465,7 @@ impl Workbench {
             }
             AutoSave::OnFocusChange => {
                 let focused = (self.focus == Focus::Editor && self.palette.is_none())
-                    .then(|| self.active_editor().filter(|e| e.diff.is_none() && !e.settings).map(|e| e.doc))
+                    .then(|| self.active_editor().filter(|e| e.diff.is_none()).map(|e| e.doc))
                     .flatten();
                 if let Some(prev) = self.auto_save.focused_doc.filter(|p| Some(*p) != focused) {
                     self.save_doc_quietly(prev);

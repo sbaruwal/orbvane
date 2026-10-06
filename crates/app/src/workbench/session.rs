@@ -104,7 +104,7 @@ struct GroupState {
 
 #[derive(Default, Serialize, Deserialize, Debug, PartialEq)]
 struct TabState {
-    /// The file (None: an untitled document, or the Settings editor).
+    /// The file (None: an untitled document).
     path: Option<PathBuf>,
     #[serde(default)]
     untitled: Option<usize>,
@@ -293,7 +293,6 @@ impl Workbench {
                 for (i, ed) in g.tabs.iter().enumerate() {
                     let doc = self.docs.get(ed.doc).and_then(Option::as_ref);
                     let state = match doc {
-                        _ if ed.settings => Some(TabState { settings: true, ..Default::default() }),
                         _ if ed.diff.is_some() || ed.markdown.is_some() => None,
                         Some(doc) => {
                             let dirty = doc.buffer.is_dirty() || (doc.untitled.is_some() && !doc.buffer.text().is_empty());
@@ -436,12 +435,11 @@ impl Workbench {
         }
 
         let mut groups = Vec::new();
-        let mut settings_at = None;
-        for (gi, gs) in state.groups.iter().enumerate() {
+        for gs in &state.groups {
             let mut tabs = Vec::new();
             for t in &gs.tabs {
+                // Settings used to be a tab; it's a sheet now and isn't restored.
                 if t.settings {
-                    settings_at = Some((gi, tabs.len()));
                     continue;
                 }
                 // An image reopens in its preview.
@@ -516,7 +514,7 @@ impl Workbench {
         let mut active_group = state.active_group;
         let mut i = 0;
         groups.retain(|g| {
-            let keep = !g.tabs.is_empty() || settings_at.is_some_and(|(sg, _)| sg == i);
+            let keep = !g.tabs.is_empty();
             if !keep && i < active_group {
                 active_group -= 1;
             }
@@ -528,20 +526,6 @@ impl Workbench {
         }
         self.active_group = active_group.min(groups.len() - 1);
         self.groups = groups;
-        if let Some((g, i)) = settings_at {
-            let (prev_group, prev_active) = (self.active_group, self.groups.get(g).map(|gr| gr.active));
-            self.active_group = g.min(self.groups.len() - 1);
-            let group = &mut self.groups[self.active_group];
-            group.active = i.min(group.tabs.len()).saturating_sub(1);
-            self.open_settings_ui();
-            // open_settings_ui focuses the settings tab; keep the saved active tab.
-            self.active_group = prev_group;
-            if let (Some(a), Some(group)) = (prev_active, self.groups.get_mut(g)) {
-                if a >= i {
-                    group.active = a;
-                }
-            }
-        }
         self.focus = Focus::Editor;
     }
 

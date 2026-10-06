@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use render::{Canvas, Color, Icon, Rect, TextStyle};
 use scm::{Change, Event, FileStatus, Job, LineChange, Op, Repo};
 
+use super::controls::{FIELD_H, FIELD_RADIUS};
 use super::{Focus, Hit, View, Workbench, ROW_H, SMALL, UI};
 use crate::diff_view::{DiffSpec, DiffState};
 use crate::editor::{Doc, EditorState};
@@ -803,45 +804,16 @@ impl Workbench {
         let x = body.x + 12.0;
         let w = body.w - 24.0;
         let Some(repo) = &self.repo else {
-            let style = TextStyle::ui(UI, fg);
             // No git at all (no Command Line Tools): say so, and offer to install them.
             if self.tree.is_some() && scm::git_available().is_err() {
-                let mut y = body.y + 8.0;
-                let msg = "Source control needs git, which isn't installed. macOS installs it with the Command Line Tools (or install it with Homebrew: brew install git), then reopen the folder.";
-                for line in wrap(c, msg, &style, w) {
-                    c.text(x, y, &line, &style);
-                    y += style.line_height;
-                }
-                let btn = Rect::new(x, y + 10.0, w, 26.0);
-                let hit = Hit::Scm(ScmAction::InstallGit);
-                let bg = self.color(if self.hovered(hit) { "button.hoverBackground" } else { "button.background" });
-                c.fill_rounded(btn, bg, 2.0);
-                let bs = TextStyle::ui(UI, self.color("button.foreground"));
-                let label = "Install the Command Line Tools";
-                let tw = c.measure(label, &bs);
-                c.text_in(Rect::new(btn.x + (btn.w - tw) / 2.0, btn.y, tw + 1.0, btn.h), label, &bs);
-                self.hits.push((btn, hit));
-                return;
-            }
-            let msg = if self.tree.is_some() {
-                "The folder currently open doesn't have a git repository. You can initialize a repository which will enable source control features powered by git."
+                let detail = "macOS installs it with the Command Line Tools (or install it with Homebrew: brew install git), then reopen the folder.";
+                let action = Some(("Install the Command Line Tools", Hit::Scm(ScmAction::InstallGit)));
+                self.empty_state(c, body, &icons::SOURCE_CONTROL, "Source control needs git", detail, action);
+            } else if self.tree.is_some() {
+                let detail = "This folder isn't a git repository yet. Initialize one to track its changes.";
+                self.empty_state(c, body, &icons::SOURCE_CONTROL, "No repository", detail, Some(("Initialize Repository", Hit::Scm(ScmAction::InitRepo))));
             } else {
-                "Open a folder to use source control."
-            };
-            let mut y = body.y + 8.0;
-            for line in wrap(c, msg, &style, w) {
-                c.text(x, y, &line, &style);
-                y += style.line_height;
-            }
-            if self.tree.is_some() {
-                let btn = Rect::new(x, y + 10.0, w, 26.0);
-                let hit = Hit::Scm(ScmAction::InitRepo);
-                let bg = self.color(if self.hovered(hit) { "button.hoverBackground" } else { "button.background" });
-                c.fill_rounded(btn, bg, 2.0);
-                let bs = TextStyle::ui(UI, self.color("button.foreground"));
-                let tw = c.measure("Initialize Repository", &bs);
-                c.text_in(Rect::new(btn.x + (btn.w - tw) / 2.0, btn.y, tw + 1.0, btn.h), "Initialize Repository", &bs);
-                self.hits.push((btn, hit));
+                self.empty_state(c, body, &icons::SOURCE_CONTROL, "No folder open", "Open a folder to use source control.", None);
             }
             return;
         };
@@ -851,15 +823,15 @@ impl Workbench {
 
         // Commit message and button.
         let mut y = body.y + 4.0;
-        let input = Rect::new(x, y, w, 26.0);
+        let input = Rect::new(x, y, w, FIELD_H);
         let focused = self.focus == Focus::Scm && self.palette.is_none();
-        c.bordered(input, self.color("input.background"), self.color(if focused { "focusBorder" } else { "input.border" }), 1.0, 2.0);
+        self.field_frame(c, input, focused);
         let style = TextStyle::ui(UI, self.color("input.foreground"));
         let (ph, sel, caret_on) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"), self.caret_on());
         let placeholder = format!("Message (⌘⏎ to commit on '{branch}')");
-        self.scm.message.draw(c, Rect::new(input.x + 6.0, input.y, input.w - 12.0, input.h), &style, &placeholder, ph, focused, caret_on, sel);
+        self.scm.message.draw(c, Self::field_text_rect(input), &style, &placeholder, ph, focused, caret_on, sel);
         self.hits.push((input, Hit::ScmMessage));
-        y += 32.0;
+        y += FIELD_H + 6.0;
         // The action button: Commit, or Publish Branch / Sync Changes when there's nothing to
         // commit, or Continue during a rebase.
         let st = &repo.status;
@@ -878,8 +850,8 @@ impl Workbench {
             ("Commit".to_string(), &icons::CHECK, ScmAction::Commit, false, false)
         };
         let enabled = enabled && !busy;
-        let btn = Rect::new(x, y, w, 26.0);
-        let (main, menu) = if chevron { btn.cut_right(26.0) } else { (btn, Rect::default()) };
+        let btn = Rect::new(x, y, w, FIELD_H);
+        let (main, menu) = if chevron { btn.cut_right(FIELD_H) } else { (btn, Rect::default()) };
         let hit = Hit::Scm(action);
         let menu_hit = Hit::Scm(ScmAction::CommitMenu);
         let bg = |wb: &Self, h: Hit| {
@@ -891,11 +863,11 @@ impl Workbench {
                 wb.color("button.background")
             }
         };
-        c.fill_rounded(btn, bg(self, hit), 2.0);
+        c.fill_rounded(btn, bg(self, hit), FIELD_RADIUS);
         let bfg = if enabled { self.color("button.foreground") } else { self.color("descriptionForeground") };
         if chevron {
             if enabled && self.hovered(menu_hit) {
-                c.fill_rounded(menu, bg(self, menu_hit), 2.0);
+                c.fill_rounded(menu, bg(self, menu_hit), FIELD_RADIUS);
             }
             c.fill(Rect::new(menu.x, menu.y + 4.0, 1.0, menu.h - 8.0), self.color_or("button.separator", "button.foreground"));
             c.icon_in(&icons::CHEVRON_DOWN, menu, 16.0, bfg);
@@ -905,7 +877,7 @@ impl Workbench {
         let tw = c.measure(&label, &bs) + 20.0;
         let bx = main.x + (main.w - tw) / 2.0;
         let turn = if self.git_spinning() && action == ScmAction::Sync { self.git_spin_turn() } else { 0 };
-        c.icon_turned(icon, bx, btn.y + 5.0, 16.0, bfg, turn);
+        c.icon_turned(icon, bx, btn.y + (btn.h - 16.0) / 2.0, 16.0, bfg, turn);
         c.text_in(Rect::new(bx + 20.0, btn.y, tw, btn.h), &label, &bs);
         if enabled {
             self.hits.push((main, hit));
@@ -913,7 +885,7 @@ impl Workbench {
                 self.hits.push((menu, menu_hit));
             }
         }
-        y += 34.0;
+        y += FIELD_H + 8.0;
 
         // Change lists, and the GRAPH section below them.
         let avail = (body.bottom() - y).max(0.0);
@@ -1050,22 +1022,4 @@ impl Workbench {
 
 fn badge_w(c: &mut Canvas, n: usize) -> f32 {
     (c.measure(&n.to_string(), &TextStyle::ui(SMALL, Color::TRANSPARENT)) + 10.0).max(18.0)
-}
-
-fn wrap(c: &mut Canvas, text: &str, style: &TextStyle, width: f32) -> Vec<String> {
-    let mut lines = Vec::new();
-    let mut line = String::new();
-    for word in text.split(' ') {
-        let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
-        if !line.is_empty() && c.measure(&candidate, style) > width {
-            lines.push(std::mem::take(&mut line));
-            line = word.to_string();
-        } else {
-            line = candidate;
-        }
-    }
-    if !line.is_empty() {
-        lines.push(line);
-    }
-    lines
 }

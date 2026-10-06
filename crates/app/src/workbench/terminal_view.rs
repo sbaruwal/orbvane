@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use render::{Canvas, Color, Rect, TextStyle};
 use terminal::{flags, CursorShape, Terminal};
 
-use super::{Focus, Hit, Workbench, PANEL_TERMINAL, ROW_H, UI};
+use super::{Focus, Hit, Workbench, PANEL_TERMINAL};
 use crate::config;
 use crate::icons;
 use crate::input::{Key, KeyInput};
@@ -17,7 +17,6 @@ const PAD_X: f32 = 20.0;
 const PAD_Y: f32 = 4.0;
 const SCROLLBAR_W: f32 = 10.0;
 /// Width of the terminal list shown when there is more than one terminal.
-const TABS_W: f32 = 160.0;
 /// How often terminal titles (the foreground process) are refreshed.
 const TITLE_POLL: Duration = Duration::from_secs(1);
 
@@ -98,7 +97,7 @@ pub(super) struct Terminals {
 }
 
 impl Terminals {
-    fn count(&self) -> usize {
+    pub(super) fn count(&self) -> usize {
         self.groups.iter().map(|g| g.panes.len()).sum()
     }
 
@@ -464,11 +463,6 @@ impl Workbench {
         }
     }
 
-    /// The title shown in the panel header (the active terminal's process).
-    pub(super) fn terminal_title(&self) -> String {
-        self.terms.active_instance().map_or_else(|| "zsh".to_string(), |i| i.title().to_string())
-    }
-
     /// The next title refresh while terminals are on screen (a program may start or finish
     /// without the panel redrawing otherwise).
     pub(super) fn terminal_deadline(&self) -> Option<Instant> {
@@ -479,10 +473,6 @@ impl Workbench {
         g.panes.iter().filter_map(|i| i.title_checked).min().map(|t| t + TITLE_POLL)
     }
 
-    /// Whether the terminal list is shown (more than one terminal, like the default).
-    pub(super) fn terminal_tabs_visible(&self) -> bool {
-        self.terms.count() > 1
-    }
 
     // ------------------------------------------------------------------ drawing
 
@@ -506,7 +496,7 @@ impl Workbench {
             palette: ansi_palette(&self.theme),
         };
         c.fill(body, colors.bg);
-        let (panes_rect, tabs_rect) = if self.terminal_tabs_visible() { body.cut_right(TABS_W) } else { (body, Rect::default()) };
+        let panes_rect = body;
         let n = self.terms.groups[self.terms.active].panes.len();
         let border = self.color_or("terminal.border", "panel.border");
         let pane_w = panes_rect.w / n as f32;
@@ -518,9 +508,6 @@ impl Workbench {
             }
             self.hits.push((r, Hit::TerminalPane(p)));
             self.draw_terminal_pane(c, r, p, focused_pane == Some(p), &colors);
-        }
-        if tabs_rect.w > 0.0 {
-            self.draw_terminal_tabs(c, tabs_rect);
         }
     }
 
@@ -663,52 +650,54 @@ impl Workbench {
     }
 
     /// The terminal list: one row per terminal, split groups drawn as a tree.
-    fn draw_terminal_tabs(&mut self, c: &mut Canvas, r: Rect) {
-        c.fill(Rect::new(r.x, r.y, 1.0, r.h), self.color("panel.border"));
-        let focused = self.focus == Focus::Terminal && self.palette.is_none();
-        let fg = self.color("foreground");
-        let icon_fg = self.color("icon.foreground");
-        let style = TextStyle::ui(UI, fg);
-        let mut y = r.y + 2.0;
-        c.push_clip(r);
-        let rows: Vec<(usize, usize, usize, String)> = self
+    /// The terminals as chips in the panel's header (in `area`): one per group (split panes
+    /// share a chip, their titles joined), the active one filled; × closes its active pane.
+    pub(super) fn draw_terminal_chips(&mut self, c: &mut Canvas, area: Rect) {
+        let fg = self.color("panelTitle.activeForeground");
+        let dim = self.color("panelTitle.inactiveForeground");
+        let chips: Vec<(usize, usize, String)> = self
             .terms
             .groups
             .iter()
             .enumerate()
-            .flat_map(|(g, group)| group.panes.iter().enumerate().map(move |(p, inst)| (g, p, group.panes.len(), inst.title().to_string())))
+            .map(|(g, group)| (g, group.active, group.panes.iter().map(|p| p.title().to_string()).collect::<Vec<_>>().join(" | ")))
             .collect();
-        for (g, p, n, title) in rows {
-            let row = Rect::new(r.x + 1.0, y, r.w - 1.0, ROW_H);
-            let active = g == self.terms.active && p == self.terms.groups[g].active;
-            let hovered = row.contains(self.mouse.0, self.mouse.1) && self.drag.is_none();
+        if chips.is_empty() || area.w < 60.0 {
+            return;
+        }
+        let style = TextStyle::ui(12.0, fg);
+        // Chrome around a title: icon, gaps and the close button.
+        const CHROME: f32 = 8.0 + 14.0 + 6.0 + 6.0 + 18.0 + 4.0;
+        let wanted: Vec<f32> = chips.iter().map(|(_, _, t)| c.measure(t, &style).min(200.0)).collect();
+        let room = area.w - 4.0 * chips.len() as f32;
+        let total: f32 = wanted.iter().map(|w| w + CHROME).sum();
+        // Too many to fit: every title gets the same share.
+        let share = if total > room { ((room / chips.len() as f32) - CHROME).max(24.0) } else { f32::MAX };
+        c.push_clip(area);
+        let mut x = area.x;
+        for ((g, p, title), want) in chips.into_iter().zip(wanted) {
+            let tw = want.min(share);
+            let chip = Rect::new(x, area.y + 7.0, tw + CHROME, area.h - 14.0);
+            let active = g == self.terms.active;
+            let close = Rect::new(chip.right() - 22.0, chip.y + (chip.h - 18.0) / 2.0, 18.0, 18.0);
+            let hovered = self.hovered(Hit::TerminalTab(g, p)) || self.hovered(Hit::TerminalTabAction(g, p, false));
             if active {
-                let key = if focused { "list.activeSelectionBackground" } else { "list.inactiveSelectionBackground" };
-                c.fill(row, self.color(key));
+                c.fill_rounded(chip, self.color_or("list.inactiveSelectionBackground", "toolbar.hoverBackground"), 6.0);
             } else if hovered {
-                c.fill(row, self.color("list.hoverBackground"));
+                c.fill_rounded(chip, self.color("toolbar.hoverBackground"), 6.0);
             }
-            self.hits.push((row, Hit::TerminalTab(g, p)));
-            // Split groups: "┌", "├", "└" before the icon.
-            let mut x = row.x + 8.0;
-            if n > 1 {
-                let branch = if p == 0 { "┌" } else if p + 1 == n { "└" } else { "├" };
-                let bs = TextStyle::mono(12.0, ROW_H, self.color("tree.indentGuidesStroke"));
-                c.text_in(Rect::new(x, row.y, 12.0, ROW_H), branch, &bs);
-                x += 14.0;
+            let color = if active || hovered { fg } else { dim };
+            c.icon(&icons::TERMINAL, chip.x + 8.0, chip.y + (chip.h - 14.0) / 2.0, 14.0, color);
+            c.text_fit(Rect::new(chip.x + 28.0, chip.y, tw + 2.0, chip.h), &title, &style.color(color));
+            self.hits.push((chip, Hit::TerminalTab(g, p)));
+            if active || hovered {
+                if self.hovered(Hit::TerminalTabAction(g, p, false)) {
+                    c.fill_rounded(close, self.color("toolbar.hoverBackground"), 5.0);
+                }
+                c.icon_in(&icons::CLOSE, close, 14.0, color);
+                self.hits.push((close, Hit::TerminalTabAction(g, p, false)));
             }
-            let text_fg = if active && focused { self.color_or("list.activeSelectionForeground", "foreground") } else { fg };
-            c.icon(&icons::TERMINAL, x, row.y + 3.0, 16.0, icon_fg);
-            let actions_w = if hovered { 48.0 } else { 0.0 };
-            c.push_clip(Rect::new(x + 20.0, row.y, (row.right() - x - 24.0 - actions_w).max(0.0), ROW_H));
-            c.text_in(Rect::new(x + 22.0, row.y, row.w, ROW_H), &title, &style.color(text_fg));
-            c.pop_clip();
-            if hovered {
-                let b = |i: f32| Rect::new(row.right() - 24.0 - i * 22.0, row.y + 1.0, 20.0, 20.0);
-                self.icon_button(c, b(1.0), &icons::SPLIT, Hit::TerminalTabAction(g, p, true), icon_fg);
-                self.icon_button(c, b(0.0), &icons::TRASH, Hit::TerminalTabAction(g, p, false), icon_fg);
-            }
-            y += ROW_H;
+            x = chip.right() + 4.0;
         }
         c.pop_clip();
     }

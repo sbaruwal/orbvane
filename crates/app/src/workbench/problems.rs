@@ -109,7 +109,7 @@ impl Workbench {
         self.icon_button(c, funnel, &icons::FILTER, Hit::ProblemsFilterMenu, fg);
         let field = Rect::new(funnel.x - 4.0 - w, header.y + 6.0, w, 24.0);
         let border = if focused { self.color("focusBorder") } else { self.color_or("input.border", "input.background") };
-        c.bordered(field, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(field, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let caret_on = self.editor_caret_on();
         let (fg, ph, sel) = (self.color("input.foreground"), self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
         self.problems_filter.field.draw(c, Rect::new(field.x + 6.0, field.y, field.w - 12.0, field.h), &TextStyle::ui(UI, fg), "Filter (e.g. text, **/*.ts, !**/node_modules/**)", ph, focused, caret_on, sel);

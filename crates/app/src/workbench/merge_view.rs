@@ -780,7 +780,7 @@ impl Workbench {
         let r = Rect::new(result.right() - 14.0 - 16.0 - w, result.bottom() - 16.0 - 26.0, w, 26.0);
         let hit = Hit::MergeComplete(g);
         let bg = self.color(if self.hovered(hit) { "button.hoverBackground" } else { "button.background" });
-        c.bordered(r, bg, self.color_or("button.border", "contrastBorder"), 1.0, 2.0);
+        c.bordered(r, bg, self.color_or("button.border", "contrastBorder"), 1.0, super::controls::FIELD_RADIUS);
         c.text_in(Rect::new(r.x + 13.0, r.y + 4.0, w - 26.0, 18.0), label, &st);
         self.hits.push((r, hit));
     }
@@ -793,7 +793,7 @@ impl Workbench {
         let r = Rect::new(editor.right() - 14.0 - 16.0 - w, editor.bottom() - 16.0 - 26.0, w, 26.0);
         let hit = Hit::OpenMergeEditor(g);
         let bg = self.color(if self.hovered(hit) { "button.hoverBackground" } else { "button.background" });
-        c.bordered(r, bg, self.color_or("button.border", "contrastBorder"), 1.0, 2.0);
+        c.bordered(r, bg, self.color_or("button.border", "contrastBorder"), 1.0, super::controls::FIELD_RADIUS);
         c.text_in(Rect::new(r.x + 13.0, r.y + 4.0, w - 26.0, 18.0), label, &st);
         self.hits.push((r, hit));
     }

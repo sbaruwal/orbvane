@@ -647,7 +647,7 @@ impl Workbench {
         } else {
             self.color_or("searchEditor.textInputBorder", "input.background")
         };
-        c.bordered(r, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(r, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let style = TextStyle::ui(UI, self.color("input.foreground"));
         let text_r = Rect::new(r.x + 6.0, r.y, r.w - 12.0 - reserve, r.h);
         let (ph, sel) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));

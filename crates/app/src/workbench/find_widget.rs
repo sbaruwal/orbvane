@@ -1,6 +1,6 @@
 //! The in-editor Find/Replace widget (⌘F / ⌥⌘F), floating at the top right of an editor.
 
-use render::{Canvas, Icon, Rect, TextStyle};
+use render::{Canvas, Color, Icon, Rect, TextStyle};
 use search::Query;
 use text::{Pos, Selection};
 
@@ -398,7 +398,7 @@ impl Workbench {
         } else {
             self.color("input.border")
         };
-        c.bordered(r, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(r, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let style = TextStyle::ui(UI, self.color("input.foreground"));
         let text_r = Rect::new(r.x + 5.0, r.y, r.w - 10.0 - reserve, r.h);
         let (ph, sel) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
@@ -419,10 +419,10 @@ impl Workbench {
         let show_replace = self.groups[g].find.show_replace;
         let h = if show_replace { ROW * 2.0 - 4.0 } else { ROW };
         // Right-aligned, clear of the vertical scrollbar.
-        let r = Rect::new((editor.right() - 14.0 - w).round(), editor.y, w, h);
+        let r = Rect::new((editor.right() - 14.0 - w).round(), editor.y + 6.0, w, h + 4.0);
         c.push_layer();
-        c.shadow(r, 4.0, self.color("widget.shadow"));
-        c.bordered(r, self.color("editorWidget.background"), self.color("editorWidget.border"), 1.0, 4.0);
+        self.floating(c, r, super::controls::CARD_RADIUS);
+        let r = Rect::new(r.x, r.y + 2.0, r.w, h);
         self.hits.push((r, Hit::FindWidgetBox(g)));
 
         // Replace toggle chevron, full height.
@@ -436,7 +436,9 @@ impl Workbench {
 
         // Find row: input (with toggles) | count | ↑ ↓ ×
         let buttons_w = 3.0 * 22.0;
-        let count_w = 70.0;
+        // Room for the longest count ("No results", "999 of 9999").
+        let count_st = TextStyle::ui(12.0, Color::TRANSPARENT);
+        let count_w = c.measure("No results", &count_st).max(c.measure("999 of 9999", &count_st)) + 10.0;
         let input_x = r.x + 22.0;
         let input_w = r.w - 22.0 - count_w - buttons_w - 8.0;
         let find_r = Rect::new(input_x, r.y + 4.0, input_w, INPUT_H);
@@ -463,7 +465,7 @@ impl Workbench {
         self.find_toggle(c, g, t(1.0), "ab", ww, FindAction::WholeWord, true);
         self.find_toggle(c, g, t(2.0), ".*", rx, FindAction::Regex, false);
         let count_style = TextStyle::ui(12.0, if no_results { self.color("errorForeground") } else { self.color("foreground") });
-        c.text_in(Rect::new(find_r.right() + 6.0, find_r.y, count_w, INPUT_H), &count_label, &count_style);
+        c.text_fit(Rect::new(find_r.right() + 6.0, find_r.y, count_w - 8.0, INPUT_H), &count_label, &count_style);
         let has = !self.groups[g].find.matches.is_empty();
         let bx = find_r.right() + 6.0 + count_w;
         let b = |i: f32| Rect::new(bx + i * 22.0, find_r.y + 2.5, 20.0, 20.0);

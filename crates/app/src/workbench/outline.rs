@@ -615,7 +615,7 @@ impl Workbench {
             let border = if found { theme.color("focusBorder") } else { theme.color("inputValidation.errorBorder") };
             c.push_layer(); // above the rows' text
             c.fill(bx.inset(-2.0, -2.0), theme.color("widget.shadow"));
-            c.bordered(bx, theme.color("input.background"), border, 1.0, 2.0);
+            c.bordered(bx, theme.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
             let query_style = TextStyle::ui(UI, theme.color("input.foreground"));
             c.push_clip(bx);
             c.text_fit(Rect::new(bx.x + 6.0, bx.y, bx.w - 12.0, bx.h), &o.query, &query_style);

@@ -627,7 +627,7 @@ impl Workbench {
         let field = Rect::new(filter_r.x + 12.0, filter_r.y + 5.0, filter_r.w - 24.0, 24.0);
         let focused = self.focus == Focus::TestingFilter && self.palette.is_none();
         let border = if focused { self.color("focusBorder") } else { self.color_or("input.border", "input.background") };
-        c.bordered(field, self.color("input.background"), border, 1.0, 2.0);
+        c.bordered(field, self.color("input.background"), border, 1.0, super::controls::FIELD_RADIUS);
         let caret_on = self.editor_caret_on();
         let (ifg, ph, sel) = (self.color("input.foreground"), self.color("input.placeholderForeground"), self.color("editor.selectionBackground"));
         c.push_clip(field);
@@ -898,14 +898,13 @@ impl Workbench {
     pub(super) fn draw_test_results(&mut self, c: &mut Canvas, body: Rect) {
         let fg = self.color("terminal.foreground");
         c.push_clip(body);
-        let t = &self.testing;
-        if t.output.is_empty() {
-            let style = TextStyle::ui(UI, self.color("foreground"));
-            let msg = if t.is_running() { "Running tests..." } else { "No test results yet." };
-            c.text(body.x + 20.0, body.y + 4.0, msg, &style);
+        if self.testing.output.is_empty() {
+            let title = if self.testing.is_running() { "Running tests..." } else { "No test results yet" };
+            self.empty_state(c, body, &icons::BEAKER, title, "Run tests from the Testing view or a code lens.", None);
             c.pop_clip();
             return;
         }
+        let t = &self.testing;
         let palette = super::terminal_view::ansi_palette(&self.theme);
         let n = ((body.h - 8.0) / OUTPUT_LINE_H).floor().max(0.0) as usize;
         let max = t.output.len().saturating_sub(n) as f32;

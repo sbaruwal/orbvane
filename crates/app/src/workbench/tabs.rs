@@ -145,7 +145,7 @@ impl Workbench {
         dst.tabs.insert(j, tab);
         dst.active = j;
         self.active_group = tg;
-        self.focus = if self.settings_active() { Focus::Settings } else { Focus::Editor };
+        self.focus = Focus::Editor;
         (tg, j)
     }
 
@@ -185,7 +185,7 @@ impl Workbench {
         let which = (0..gr.tabs.len())
             .filter(|&i| {
                 let t = &gr.tabs[i];
-                t.settings || t.diff.is_some() || self.docs[t.doc].as_ref().is_none_or(|d| !d.buffer.is_dirty())
+                t.diff.is_some() || self.docs[t.doc].as_ref().is_none_or(|d| !d.buffer.is_dirty())
             })
             .collect();
         self.close_tabs(g, which);
