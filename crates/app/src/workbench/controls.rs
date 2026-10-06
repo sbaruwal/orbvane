@@ -55,6 +55,7 @@ impl Workbench {
         c.text_fit(Rect::new(r.x + ((r.w - lw) / 2.0).max(6.0), r.y, lw + 2.0, r.h), label, &st);
         if enabled {
             self.hits.push((r, hit));
+            self.a11y_name(hit, super::a11y::Role::Button, label, false);
         }
     }
 
@@ -132,6 +133,7 @@ impl Workbench {
             let tw = c.measure(label, &st);
             c.text_in(Rect::new(seg.x + (seg.w - tw) / 2.0, seg.y, tw + 1.0, seg.h), label, &st);
             self.hits.push((seg, hit(i)));
+            self.a11y_name(hit(i), super::a11y::Role::Tab, *label, on);
             sx += w;
         }
         total

@@ -119,6 +119,8 @@ enum Input {
     Window(WindowId, WindowEvent),
     Menu(muda::MenuId),
     Open(Vec<PathBuf>),
+    /// Assistive technology pressed a control: (window, node).
+    Press(WindowId, u64),
 }
 
 impl Input {
@@ -128,6 +130,7 @@ impl Input {
         match self {
             Input::Menu(_) => true,
             Input::Open(_) => false,
+            Input::Press(..) => true,
             Input::Window(_, e) => matches!(
                 e,
                 WindowEvent::MouseInput { state: ElementState::Pressed, .. }
@@ -194,14 +197,19 @@ struct App {
 impl App {
     /// Queues input for `drain`.
     fn push(&self, input: Input) {
-        let busy = self.shared.core.try_borrow_mut().is_err();
-        if busy && input.is_user_input() {
-            return; // a dialog is open
-        }
-        self.shared.queue.borrow_mut().push_back(input);
-        if !self.shared.scheduled.replace(true) {
-            dispatch2::DispatchQueue::main().exec_async(drain);
-        }
+        queue(&self.shared, input);
+    }
+}
+
+/// Queues input for `drain` (dropped when it's the user's and a dialog is open).
+fn queue(shared: &Shared, input: Input) {
+    let busy = shared.core.try_borrow_mut().is_err();
+    if busy && input.is_user_input() {
+        return; // a dialog is open
+    }
+    shared.queue.borrow_mut().push_back(input);
+    if !shared.scheduled.replace(true) {
+        dispatch2::DispatchQueue::main().exec_async(drain);
     }
 }
 
@@ -960,6 +968,14 @@ impl Core {
         let (id, event) = match input {
             Input::Menu(id) => return self.menu(id),
             Input::Open(paths) => return self.open_paths(paths),
+            Input::Press(id, node) => {
+                if let Some(i) = self.index(id) {
+                    self.dirty.push(id);
+                    self.wins[i].workbench.activate();
+                    self.wins[i].workbench.a11y_press(node);
+                }
+                return;
+            }
             Input::Window(id, e) => (id, e),
         };
         let Some(i) = self.index(id) else { return };

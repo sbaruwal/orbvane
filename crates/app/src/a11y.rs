@@ -155,6 +155,8 @@ fn element_class() -> &'static AnyClass {
     unsafe {
         b.add_method(sel!(isAccessibilityElement), is_element as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityRole), role as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(accessibilitySubrole), subrole as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(accessibilityPerformPress), press as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityLabel), label as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityFrame), frame as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityParent), parent as unsafe extern "C-unwind" fn(_, _) -> _);
@@ -183,8 +185,9 @@ fn node_role(key: Key) -> Option<A11yRole> {
     with_workbench(key.window, |wb| wb.a11y_node(key.node).map(|n| n.role)).flatten()
 }
 
+/// Text areas and text fields.
 fn is_text(key: Key) -> bool {
-    node_role(key) == Some(A11yRole::TextArea)
+    matches!(node_role(key), Some(A11yRole::TextArea | A11yRole::TextField))
 }
 
 unsafe extern "C-unwind" fn is_element(_this: &AnyObject, _: Sel) -> Bool {
@@ -196,9 +199,30 @@ unsafe extern "C-unwind" fn role(this: &AnyObject, _: Sel) -> *mut NSString {
         Some(A11yRole::TextArea) => "AXTextArea",
         Some(A11yRole::List) => "AXList",
         Some(A11yRole::Item) => "AXStaticText",
-        _ => "AXGroup",
+        Some(A11yRole::Button) => "AXButton",
+        Some(A11yRole::Tab) => "AXRadioButton",
+        Some(A11yRole::CheckBox) => "AXCheckBox",
+        Some(A11yRole::TextField) => "AXTextField",
+        Some(A11yRole::Group) | None => "AXGroup",
     };
     ns_string(role)
+}
+
+unsafe extern "C-unwind" fn subrole(this: &AnyObject, _: Sel) -> *mut NSString {
+    match key_of(this).and_then(node_role) {
+        Some(A11yRole::Tab) => ns_string("AXTabButton"),
+        _ => null_mut(),
+    }
+}
+
+/// Presses a button, tab or check box: queued like a click, since what it does may open a
+/// dialog, which mustn't run inside VoiceOver's question.
+unsafe extern "C-unwind" fn press(this: &AnyObject, _: Sel) -> Bool {
+    let Some(k) = key_of(this).filter(|k| matches!(node_role(*k), Some(A11yRole::Button | A11yRole::Tab | A11yRole::CheckBox))) else {
+        return Bool::NO;
+    };
+    crate::queue(&crate::shared(), crate::Input::Press(winit::window::WindowId::from(k.window), k.node));
+    Bool::YES
 }
 
 unsafe extern "C-unwind" fn label(this: &AnyObject, _: Sel) -> *mut NSString {
@@ -256,7 +280,14 @@ unsafe extern "C-unwind" fn value(this: &AnyObject, _: Sel) -> *mut AnyObject {
     let Some(k) = key_of(this) else { return null_mut() };
     match node_role(k) {
         Some(A11yRole::TextArea) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
+        Some(A11yRole::TextField) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
         Some(A11yRole::Item) => ns_string(&with_workbench(k.window, |wb| wb.a11y_node(k.node).map(|n| n.label.clone())).flatten().unwrap_or_default()) as *mut AnyObject,
+        // Tabs and check boxes: 1 when selected or on.
+        Some(A11yRole::Tab | A11yRole::CheckBox) => {
+            let on = with_workbench(k.window, |wb| wb.a11y_node(k.node).is_some_and(|n| n.selected)).unwrap_or(false);
+            // SAFETY: a class method returning an autoreleased NSNumber.
+            unsafe { msg_send![class!(NSNumber), numberWithInteger: on as isize] }
+        }
         _ => null_mut(),
     }
 }

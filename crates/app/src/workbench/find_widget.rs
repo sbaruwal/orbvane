@@ -40,9 +40,9 @@ pub(super) struct FindWidget {
     replace: TextField,
     show_replace: bool,
     field: Option<FindField>,
-    case_sensitive: bool,
-    whole_word: bool,
-    regex: bool,
+    pub(super) case_sensitive: bool,
+    pub(super) whole_word: bool,
+    pub(super) regex: bool,
     /// Matches in the document, sorted by position.
     pub matches: Vec<(Pos, Pos)>,
     pub current: Option<usize>,

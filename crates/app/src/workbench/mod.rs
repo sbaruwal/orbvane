@@ -542,6 +542,10 @@ pub struct Workbench {
     preedit: crate::ime::Preedit,
     /// What this frame shows to assistive technology (`a11y.rs`).
     a11y: Vec<a11y::Node>,
+    /// Controls named while drawing this frame: (hit, role, label, selected).
+    a11y_names: Vec<(Hit, a11y::Role, String, bool)>,
+    /// The controls assistive technology can press: (node, hit).
+    a11y_presses: Vec<(u64, Hit)>,
     ime_area: Option<Rect>,
     mouse: (f32, f32),
     drag: Option<Drag>,
@@ -706,6 +710,8 @@ impl Workbench {
             hover_hit: None,
             preedit: Default::default(),
             a11y: Vec::new(),
+            a11y_names: Vec::new(),
+            a11y_presses: Vec::new(),
             ime_area: None,
             mouse: (0.0, 0.0),
             drag: None,
@@ -2751,6 +2757,8 @@ impl Workbench {
     pub fn draw(&mut self, c: &mut Canvas) {
         crate::ime::begin_frame();
         self.a11y.clear();
+        self.a11y_names.clear();
+        crate::widgets::take_drawn_fields();
         c.set_ui_mono(self.ui_mono);
         let missing = c.set_mono_font(&self.font_family);
         if !missing.is_empty() {
@@ -2873,6 +2881,7 @@ impl Workbench {
             self.draw_palette(c, full);
         }
         self.draw_preedit(c);
+        self.a11y_finish();
 
         let title = self.window_title();
         if title != self.title {
@@ -2991,6 +3000,7 @@ impl Workbench {
             c.icon(&icons::FOLDER, left.x + 8.0, y + 4.5, 14.0, dim);
             c.text_fit(Rect::new(left.x + 28.0, y, pw + 1.0, h), &project, &style);
             self.hits.push((left, Hit::ToolbarProject));
+            self.a11y_name(Hit::ToolbarProject, a11y::Role::Button, format!("Project: {project}"), false);
             if let Some(branch) = &branch {
                 let right = Rect::new(left.right(), y, branch_w, h);
                 if self.hovered(Hit::ToolbarBranch) {
@@ -3000,6 +3010,7 @@ impl Workbench {
                 c.icon(&icons::BRANCH, right.x + 10.0, y + 4.5, 14.0, dim);
                 c.text_fit(Rect::new(right.x + 29.0, y, bw + 1.0, h), branch, &style);
                 self.hits.push((right, Hit::ToolbarBranch));
+                self.a11y_name(Hit::ToolbarBranch, a11y::Role::Button, format!("Branch: {branch}"), false);
             }
         }
 
@@ -3077,6 +3088,9 @@ impl Workbench {
                 c.text_in(Rect::new(badge.x + (w - tw) / 2.0, badge.y, tw + 1.0, badge.h), &label, &st);
             }
             self.hits.push((item, Hit::Activity(*view)));
+            if count > 0 {
+                self.a11y_name(Hit::Activity(*view), a11y::Role::Tab, format!("{}, {count}", view.title()), active);
+            }
             x += bw + gap;
         }
         if more {
@@ -3623,6 +3637,8 @@ impl Workbench {
                 c.icon_in(&icons::CLOSE, close, 16.0, fg);
             }
             self.hits.push((tr, Hit::Tab(g, i)));
+            let read = if *dirty { format!("{title}, edited") } else { title.to_string() };
+            self.a11y_name(Hit::Tab(g, i), a11y::Role::Tab, read, is_active);
             self.hits.push((close, Hit::TabClose(g, i)));
             x += w;
         }
@@ -3777,6 +3793,8 @@ impl Workbench {
                 self.badge(c, chip.x + 36.0 + w, chip.y + (chip.h - 16.0) / 2.0, count);
             }
             self.hits.push((chip, Hit::PanelTab(i)));
+            let read = if count > 0 { format!("{label}, {count}") } else { label.clone() };
+            self.a11y_name(Hit::PanelTab(i), a11y::Role::Tab, read, active);
             x = chip.right() + 4.0;
         }
         let fg = self.color("icon.foreground");
@@ -3828,6 +3846,9 @@ impl Workbench {
             c.text_in(Rect::new(tx, pill.y, tw + 2.0, pill.h), text, style);
         }
         self.hits.push((pill, hit));
+        if !text.is_empty() {
+            self.a11y_name(hit, a11y::Role::Button, text, false);
+        }
         w
     }
 
@@ -3910,6 +3931,8 @@ impl Workbench {
             px += 18.0;
             c.text_in(Rect::new(px, pill.y, ww + 2.0, pill.h), &w, &style);
             self.hits.push((pill, Hit::StatusProblems));
+            let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+            self.a11y_name(Hit::StatusProblems, a11y::Role::Button, format!("{}, {}", plural(errors, "error"), plural(warnings, "warning")), false);
             x += width + gap;
         }
         x += self.status_pill(c, x, r, Some((&icons::TERMINAL, fg, 0)), "Terminal", &style, Hit::StatusTerminal) + gap;

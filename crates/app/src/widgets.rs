@@ -14,6 +14,26 @@ pub enum FieldEvent {
     Changed,
 }
 
+/// A text field as it was drawn this frame, for accessibility.
+#[derive(Clone, Debug)]
+pub struct DrawnField {
+    pub frame: Rect,
+    pub text: String,
+    pub placeholder: String,
+    /// The selection as char indices, ordered.
+    pub selection: (usize, usize),
+    pub focused: bool,
+}
+
+thread_local! {
+    static DRAWN: std::cell::RefCell<Vec<DrawnField>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The text fields drawn since the last call.
+pub fn take_drawn_fields() -> Vec<DrawnField> {
+    DRAWN.with(|d| std::mem::take(&mut *d.borrow_mut()))
+}
+
 /// A single-line text input with caret, selection and horizontal scrolling.
 #[derive(Default)]
 pub struct TextField {
@@ -219,6 +239,8 @@ impl TextField {
             crate::ime::caret(Rect::new((self.origin_x + caret_x).round(), y, 1.0, style.line_height), style, Color::TRANSPARENT, &self.text[at..], r);
         }
         c.pop_clip();
+        let field = DrawnField { frame: r, text: self.text.clone(), placeholder: placeholder.to_string(), selection: self.selection(), focused };
+        DRAWN.with(|d| d.borrow_mut().push(field));
     }
 }
 

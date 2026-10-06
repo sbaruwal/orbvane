@@ -248,7 +248,8 @@ fn accessibility_tree_and_text() {
     let areas: Vec<String> = wb.a11y_children(None).into_iter().map(|id| wb.a11y_node(id).unwrap().label.clone()).collect();
     assert!(areas.contains(&"Editor".to_string()) && areas.contains(&"Status Bar".to_string()), "{areas:?}");
     let text = a11y::TEXT_AREA;
-    assert_eq!(wb.a11y_children(Some(a11y::EDITORS)), vec![text]);
+    let texts: Vec<u64> = wb.a11y_children(Some(a11y::EDITORS)).into_iter().filter(|&id| wb.a11y_node(id).unwrap().role == A11yRole::TextArea).collect();
+    assert_eq!(texts, vec![text]);
     let node = wb.a11y_node(text).unwrap();
     assert_eq!((node.role, node.label.as_str()), (A11yRole::TextArea, "main.rs"));
     assert_eq!(wb.a11y_focused(), Some(text));
@@ -289,5 +290,26 @@ fn accessibility_tree_and_text() {
     wb.cancel_palette();
     draw(&mut wb, &mut r);
     assert_eq!(wb.a11y_focused(), Some(file));
+
+    // Controls: named, in their area, pressed like a click.
+    let find = |wb: &Workbench, role: A11yRole, label: &str| wb.a11y.iter().find(|n| n.role == role && n.label == label).map(|n| (n.id, n.parent, n.selected));
+    let (_, parent, selected) = find(&wb, A11yRole::Tab, "main.rs").expect("the editor's tab");
+    assert_eq!((parent, selected), (Some(a11y::EDITORS), true));
+    assert!(find(&wb, A11yRole::Button, "Toggle Panel").is_some_and(|n| n.1 == Some(a11y::TOOLBAR)));
+    let (search, _, selected) = find(&wb, A11yRole::Tab, "Search").expect("the switcher's Search");
+    assert!(!selected);
+    wb.a11y_press(search);
+    draw(&mut wb, &mut r);
+    assert!(wb.view == View::Search);
+    assert!(find(&wb, A11yRole::Tab, "Search").unwrap().2);
+
+    // The search box has the keyboard: a text field with what's typed in it.
+    for ch in ["h", "é"] {
+        wb.key(crate::input::KeyInput { key: crate::input::Key::Char(ch.into()), text: Some(ch.into()), cmd: false, shift: false, alt: false, ctrl: false });
+    }
+    draw(&mut wb, &mut r);
+    let field = wb.a11y_focused().expect("the search field");
+    let node = wb.a11y_node(field).unwrap();
+    assert_eq!((node.role, wb.a11y_value(field).as_str(), wb.a11y_selection(field)), (A11yRole::TextField, "hé", (2, 0)));
     let _ = std::fs::remove_dir_all(&dir);
 }

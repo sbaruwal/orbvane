@@ -84,6 +84,7 @@ impl Workbench {
             }
             c.text_in(Rect::new(chip.x + 10.0, header.y, w, header.h), tab.label(), &style);
             self.hits.push((chip, Hit::AuxTab(i as u8)));
+            self.a11y_name(Hit::AuxTab(i as u8), super::a11y::Role::Tab, tab.label(), active);
             x += w + 4.0;
         }
         let fg = self.color("icon.foreground");

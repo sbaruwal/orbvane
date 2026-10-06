@@ -1739,6 +1739,8 @@ impl Workbench {
             let close_w = if active || hovered { 18.0 } else { 4.0 };
             c.text_fit(Rect::new(tx, tab.y, tab.right() - close_w - tx, tab.h), chat.label(), &label_st);
             self.hits.push((tab, Hit::AssistantTab(ci)));
+            let read = chat.label().to_string();
+            self.a11y_name(Hit::AssistantTab(ci), super::a11y::Role::Tab, read, active);
             if active || hovered {
                 let close = Rect::new(tab.right() - 19.0, tab.y + 3.0, 16.0, 16.0);
                 if self.hovered(Hit::AssistantTabClose(ci)) {
