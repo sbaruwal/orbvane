@@ -2371,8 +2371,8 @@ mod tests {
 
     #[test]
     fn finds_links() {
-        let line = "// See https://code.visualstudio.com/docs (and http://x.io/a_(b)), or mailto:me@x.io.";
-        assert_eq!(link_at(line, 10).as_deref(), Some("https://code.visualstudio.com/docs"));
+        let line = "// See https://docs.example.org/guide/abc (and http://x.io/a_(b)), or mailto:me@x.io.";
+        assert_eq!(link_at(line, 10).as_deref(), Some("https://docs.example.org/guide/abc"));
         assert_eq!(link_at(line, 50).as_deref(), Some("http://x.io/a_(b)"));
         assert_eq!(link_at(line, 75).as_deref(), Some("mailto:me@x.io"));
         assert_eq!(link_at(line, 3), None);
