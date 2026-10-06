@@ -32,7 +32,7 @@ winit = "0.30"
 wgpu = { version = "30", default-features = false, features = ["std", "metal", "wgsl"] }
 cosmic-text = "0.19"
 ropey = "1.6"
-muda = "0.20"
+muda = "0.21"
 rfd = "0.17"
 bytemuck = { version = "1", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
