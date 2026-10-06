@@ -17,13 +17,28 @@ pub const EDITORS: u64 = 3;
 pub const PANEL: u64 = 4;
 pub const STATUS_BAR: u64 = 5;
 pub const SECONDARY_SIDEBAR: u64 = 6;
+/// Lists: the Explorer's files, the palette's results, Problems, Source Control's changes and
+/// Search's results. Their rows are `item(list, index)`.
+pub const EXPLORER_LIST: u64 = 10;
+pub const PALETTE_LIST: u64 = 11;
+pub const PROBLEMS_LIST: u64 = 12;
+pub const SCM_LIST: u64 = 13;
+pub const SEARCH_LIST: u64 = 14;
 /// An editor group's text area: `TEXT_AREA + group`.
 pub const TEXT_AREA: u64 = 100;
+
+/// Row `index` of `list`.
+pub fn item(list: u64, index: usize) -> u64 {
+    (list << 32) | index as u64
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Group,
     TextArea,
+    List,
+    /// A row of a list (read as its label).
+    Item,
 }
 
 #[derive(Clone, Debug)]
@@ -34,27 +49,56 @@ pub struct Node {
     pub label: String,
     /// In window coordinates.
     pub frame: Rect,
+    /// A row that's selected.
+    pub selected: bool,
 }
 
 /// What notifications compare between frames.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct State {
     pub focused: Option<u64>,
     pub version: u64,
     pub selection: (usize, usize),
+    /// Said without moving focus (the selected suggestion while typing).
+    pub announcement: Option<String>,
+}
+
+/// How a file's git status is said.
+pub fn status_word(s: scm::FileStatus) -> &'static str {
+    use scm::FileStatus::*;
+    match s {
+        Modified => "modified",
+        Added => "added",
+        Deleted => "deleted",
+        Renamed => "renamed",
+        Copied => "copied",
+        TypeChanged => "type changed",
+        Untracked => "untracked",
+        Conflicted => "conflict",
+    }
 }
 
 impl Workbench {
     /// One of the window's areas, drawn at `frame`.
     pub(super) fn a11y_area(&mut self, id: u64, label: &str, frame: Rect) {
-        self.a11y.push(Node { id, parent: None, role: Role::Group, label: label.into(), frame });
+        self.a11y.push(Node { id, parent: None, role: Role::Group, label: label.into(), frame, selected: false });
     }
 
     /// Group `g`'s editor text (`frame` is where the text is drawn).
     pub(super) fn a11y_text_area(&mut self, g: usize, frame: Rect) {
         let Some((_, doc)) = self.a11y_editor_of(g) else { return };
         let label = doc.title();
-        self.a11y.push(Node { id: TEXT_AREA + g as u64, parent: Some(EDITORS), role: Role::TextArea, label, frame });
+        self.a11y.push(Node { id: TEXT_AREA + g as u64, parent: Some(EDITORS), role: Role::TextArea, label, frame, selected: false });
+    }
+
+    /// A list inside `parent` (None: on its own, like the palette).
+    pub(super) fn a11y_list(&mut self, id: u64, parent: Option<u64>, label: &str, frame: Rect) {
+        self.a11y.push(Node { id, parent, role: Role::List, label: label.into(), frame, selected: false });
+    }
+
+    /// Row `index` of `list`, as drawn.
+    pub(super) fn a11y_item(&mut self, list: u64, index: usize, label: String, frame: Rect, selected: bool) {
+        self.a11y.push(Node { id: item(list, index), parent: Some(list), role: Role::Item, label, frame, selected });
     }
 
     pub fn a11y_node(&self, id: u64) -> Option<&Node> {
@@ -66,10 +110,36 @@ impl Workbench {
         self.a11y.iter().filter(|n| n.parent == parent).map(|n| n.id).collect()
     }
 
-    /// The node with the keyboard: the active editor's text while the editor has focus.
+    /// The node with the keyboard: the palette's selected row while it's open, the Explorer's
+    /// selected file, the active editor's text.
     pub fn a11y_focused(&self) -> Option<u64> {
-        let id = TEXT_AREA + self.active_group as u64;
-        (self.focus == Focus::Editor && self.palette.is_none() && !self.settings_active() && self.a11y_node(id).is_some()).then_some(id)
+        let shown = |id: u64| self.a11y_node(id).is_some().then_some(id);
+        if let Some(p) = &self.palette {
+            return shown(item(PALETTE_LIST, p.selected)).or_else(|| shown(PALETTE_LIST));
+        }
+        if self.settings_active() {
+            return None;
+        }
+        match self.focus {
+            Focus::Editor => shown(TEXT_AREA + self.active_group as u64),
+            Focus::Explorer => self.tree.as_ref().and_then(|t| t.selected).and_then(|i| shown(item(EXPLORER_LIST, i))).or_else(|| shown(EXPLORER_LIST)),
+            _ => None,
+        }
+    }
+
+    /// The selected rows of `list`.
+    pub fn a11y_selected(&self, list: u64) -> Vec<u64> {
+        self.a11y.iter().filter(|n| n.parent == Some(list) && n.selected).map(|n| n.id).collect()
+    }
+
+    /// What to say without moving focus: the selected suggestion while the list is open.
+    fn a11y_announcement(&self) -> Option<String> {
+        let comp = self.completion.as_ref()?;
+        let item = comp.shown.get(comp.selected).map(|&(i, _)| &comp.items[i])?;
+        Some(match &item.detail {
+            Some(d) if !d.is_empty() => format!("{}, {d}", item.label),
+            _ => item.label.clone(),
+        })
     }
 
     /// Group `g`'s active editor when it's a text editor.
@@ -160,8 +230,9 @@ impl Workbench {
 
     /// What notifications compare from frame to frame.
     pub fn a11y_state(&self) -> State {
-        let Some(id) = self.a11y_focused() else { return State::default() };
+        let announcement = self.a11y_announcement();
+        let Some(id) = self.a11y_focused() else { return State { announcement, ..State::default() } };
         let version = self.a11y_editor(id).map_or(0, |(_, d)| d.buffer.version());
-        State { focused: Some(id), version, selection: self.a11y_selection(id) }
+        State { focused: Some(id), version, selection: self.a11y_selection(id), announcement }
     }
 }

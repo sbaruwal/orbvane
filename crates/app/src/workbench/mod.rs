@@ -3250,6 +3250,7 @@ impl Workbench {
         let visible = (rows_rect.h / ROW_H).ceil() as usize + 1;
         let style = TextStyle::ui(UI, fg);
         let mut hits = Vec::new();
+        let mut rows_read = Vec::new();
         let mut field_at = None;
         for (s, slot) in slots.iter().enumerate().skip(first).take(visible) {
             let y = rows_rect.y + s as f32 * ROW_H - tree.scroll;
@@ -3313,10 +3314,22 @@ impl Workbench {
             let hit_rect = rr.intersect(&rows_rect);
             if hit_rect.h > 0.0 {
                 hits.push((hit_rect, Hit::ExplorerRow(i)));
+                let mut label = row.name.clone();
+                if row.is_dir {
+                    label += if row.expanded { ", folder, expanded" } else { ", folder, collapsed" };
+                }
+                if let Some(s) = git {
+                    label = format!("{label}, {}", a11y::status_word(s));
+                }
+                rows_read.push((i, label, hit_rect, tree.selected == Some(i)));
             }
         }
         c.pop_clip();
         self.hits.extend(hits);
+        self.a11y_list(a11y::EXPLORER_LIST, Some(a11y::SIDEBAR), "Files", rows_rect);
+        for (i, label, rect, selected) in rows_read {
+            self.a11y_item(a11y::EXPLORER_LIST, i, label, rect, selected);
+        }
         if let Some(at) = field_at {
             self.draw_explorer_field(c, Rect::new(at.x, at.y, rows_rect.right() - at.x - 4.0, at.h), focused, caret_on);
         }
@@ -4093,6 +4106,8 @@ impl Workbench {
         }
         let commands = p.is_commands();
         let mut hits = Vec::new();
+        let mut rows_read = Vec::new();
+        let list_label = p.placeholder().to_string();
         let mut y = inner.y;
         for idx in visible {
             let item = &p.items[idx];
@@ -4149,8 +4164,20 @@ impl Workbench {
             }
             c.pop_clip();
             hits.push((rr, Hit::PaletteRow(idx)));
+            let mut label = item.label.clone();
+            if !item.detail.is_empty() {
+                label = format!("{label}, {}", item.detail);
+            }
+            if let Some(sc) = &item.shortcut {
+                label = format!("{label}, {}", sc.iter().map(|k| if k.is_empty() { " " } else { k }).collect::<String>());
+            }
+            rows_read.push((idx, label, rr, idx == p.selected));
         }
         self.hits.extend(hits);
+        self.a11y_list(a11y::PALETTE_LIST, None, &list_label, inner);
+        for (idx, label, rect, selected) in rows_read {
+            self.a11y_item(a11y::PALETTE_LIST, idx, label, rect, selected);
+        }
     }
 }
 

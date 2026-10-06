@@ -65,7 +65,7 @@ pub(super) struct Completion {
     emmet: bool,
     /// Visible items: (index into `items`, matched char indices in the label).
     pub(super) shown: Vec<(usize, Vec<usize>)>,
-    selected: usize,
+    pub(super) selected: usize,
     scroll: usize,
 }
 
@@ -1069,6 +1069,7 @@ impl Workbench {
         let visible = (body.h / ROW_H).ceil() as usize + 1;
         self.problem_targets.clear();
         self.problem_files.clear();
+        self.a11y_list(super::a11y::PROBLEMS_LIST, Some(super::a11y::PANEL), "Problems", body);
         let mut hits = Vec::new();
         for (i, row) in rows.iter().enumerate().skip(first).take(visible) {
             let y = body.y + i as f32 * ROW_H - self.problems_scroll;
@@ -1110,6 +1111,25 @@ impl Workbench {
                 }
             }
             hits.push((rr, Hit::ProblemRow(i)));
+            let label = match row {
+                ProblemRow::File(path, n) => {
+                    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+                    let dir = path.parent().map(|p| self.display_path(p)).unwrap_or_default();
+                    let open = !self.problems_filter.collapsed.contains(path);
+                    format!("{name}, {dir}, {n} {}, {}", if *n == 1 { "problem" } else { "problems" }, if open { "expanded" } else { "collapsed" })
+                }
+                ProblemRow::Diag(_, d) => {
+                    let kind = match d.severity {
+                        Severity::Error => "Error",
+                        Severity::Warning => "Warning",
+                        Severity::Information => "Info",
+                        Severity::Hint => "Hint",
+                    };
+                    let msg = d.message.lines().next().unwrap_or("");
+                    format!("{kind}: {msg}, line {}, column {}", d.range.start.line + 1, d.range.start.character + 1)
+                }
+            };
+            self.a11y_item(super::a11y::PROBLEMS_LIST, i, label, rr.intersect(&body), false);
         }
         c.pop_clip();
         self.hits.extend(hits);

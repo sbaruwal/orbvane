@@ -267,8 +267,27 @@ fn accessibility_tree_and_text() {
     wb.a11y_select(text, 0, 0);
     assert_ne!(wb.a11y_state(), before);
 
-    // Nothing that reads text has the keyboard.
+    // The Explorer is a list of its files; the selected one has the keyboard.
     wb.focus = Focus::Explorer;
-    assert_eq!(wb.a11y_focused(), None);
+    let row = wb.tree.as_ref().unwrap().rows.iter().position(|r| r.name == "main.rs").unwrap();
+    wb.tree.as_mut().unwrap().selected = Some(row);
+    draw(&mut wb, &mut r);
+    let file = a11y::item(a11y::EXPLORER_LIST, row);
+    assert_eq!(wb.a11y_node(a11y::EXPLORER_LIST).unwrap().parent, Some(a11y::SIDEBAR));
+    let node = wb.a11y_node(file).unwrap();
+    assert_eq!((node.role, node.label.as_str(), node.selected), (A11yRole::Item, "main.rs", true));
+    assert_eq!(wb.a11y_focused(), Some(file));
+    assert_eq!(wb.a11y_selected(a11y::EXPLORER_LIST), vec![file]);
+
+    // The palette's selected row takes it while the palette is open.
+    wb.run(Command::CommandPalette);
+    draw(&mut wb, &mut r);
+    let selected = wb.palette.as_ref().unwrap().selected;
+    let focused = wb.a11y_focused().unwrap();
+    assert_eq!(focused, a11y::item(a11y::PALETTE_LIST, selected));
+    assert!(!wb.a11y_node(focused).unwrap().label.is_empty());
+    wb.cancel_palette();
+    draw(&mut wb, &mut r);
+    assert_eq!(wb.a11y_focused(), Some(file));
     let _ = std::fs::remove_dir_all(&dir);
 }

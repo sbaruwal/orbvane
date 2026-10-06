@@ -3,7 +3,7 @@
 //! here each of those becomes an accessibility element (one class of ours, a subclass of
 //! NSAccessibilityElement) that answers VoiceOver's questions by asking the window's workbench.
 //! winit's view gets the methods that make them its children, and `after_frame` posts the
-//! notifications for focus, text and selection changes.
+//! notifications for focus, text and selection changes, and the announcements.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -40,6 +40,7 @@ thread_local! {
 #[link(name = "AppKit", kind = "framework")]
 unsafe extern "C" {
     fn NSAccessibilityPostNotification(element: *mut AnyObject, notification: *mut NSString);
+    fn NSAccessibilityPostNotificationWithUserInfo(element: *mut AnyObject, notification: *mut NSString, info: *mut AnyObject);
 }
 
 // ------------------------------------------------------------------ the workbench behind it
@@ -159,6 +160,8 @@ fn element_class() -> &'static AnyClass {
         b.add_method(sel!(accessibilityParent), parent as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityChildren), children as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(isAccessibilityFocused), is_focused as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(isAccessibilitySelected), is_selected as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(accessibilitySelectedChildren), selected_children as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityValue), value as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityNumberOfCharacters), char_count as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilitySelectedTextRange), selected_range as unsafe extern "C-unwind" fn(_, _) -> _);
@@ -191,6 +194,8 @@ unsafe extern "C-unwind" fn is_element(_this: &AnyObject, _: Sel) -> Bool {
 unsafe extern "C-unwind" fn role(this: &AnyObject, _: Sel) -> *mut NSString {
     let role = match key_of(this).and_then(node_role) {
         Some(A11yRole::TextArea) => "AXTextArea",
+        Some(A11yRole::List) => "AXList",
+        Some(A11yRole::Item) => "AXStaticText",
         _ => "AXGroup",
     };
     ns_string(role)
@@ -226,6 +231,18 @@ unsafe extern "C-unwind" fn is_focused(this: &AnyObject, _: Sel) -> Bool {
     Bool::new(focused)
 }
 
+unsafe extern "C-unwind" fn is_selected(this: &AnyObject, _: Sel) -> Bool {
+    let selected = key_of(this).is_some_and(|k| with_workbench(k.window, |wb| wb.a11y_node(k.node).is_some_and(|n| n.selected)).unwrap_or(false));
+    Bool::new(selected)
+}
+
+/// A list's selected rows.
+unsafe extern "C-unwind" fn selected_children(this: &AnyObject, _: Sel) -> *mut NSArray<AnyObject> {
+    let Some(k) = key_of(this) else { return ns_array(&[]) };
+    let ids = with_workbench(k.window, |wb| wb.a11y_selected(k.node)).unwrap_or_default();
+    ns_array(&ids.into_iter().map(|id| element(k.window, id)).collect::<Vec<_>>())
+}
+
 /// Asks the workbench about a text area (nothing for a group).
 fn text<R: Default>(this: &AnyObject, f: impl FnOnce(&Workbench, u64) -> R) -> R {
     match key_of(this).filter(|k| is_text(*k)) {
@@ -234,10 +251,13 @@ fn text<R: Default>(this: &AnyObject, f: impl FnOnce(&Workbench, u64) -> R) -> R
     }
 }
 
+/// A text area's text, a row's label.
 unsafe extern "C-unwind" fn value(this: &AnyObject, _: Sel) -> *mut AnyObject {
-    match key_of(this).filter(|k| is_text(*k)) {
-        Some(_) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
-        None => null_mut(),
+    let Some(k) = key_of(this) else { return null_mut() };
+    match node_role(k) {
+        Some(A11yRole::TextArea) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
+        Some(A11yRole::Item) => ns_string(&with_workbench(k.window, |wb| wb.a11y_node(k.node).map(|n| n.label.clone())).flatten().unwrap_or_default()) as *mut AnyObject,
+        _ => null_mut(),
     }
 }
 
@@ -310,14 +330,19 @@ unsafe extern "C-unwind" fn view_focused(this: *mut AnyObject, _: Sel) -> *mut A
     }
 }
 
-/// The deepest element under a screen point (text areas before the areas around them).
+/// The deepest element under a screen point (rows before their list, lists and text areas
+/// before the areas around them).
 unsafe extern "C-unwind" fn view_hit_test(this: *mut AnyObject, _: Sel, p: NSPoint) -> *mut AnyObject {
     let Some(window) = VIEWS.with(|v| v.borrow().get(&(this as usize)).copied()) else { return this };
     let Some((x, y)) = from_screen(window, p) else { return this };
     let hit = with_workbench(window, |wb| {
         let inside = |id: &u64| wb.a11y_node(*id).is_some_and(|n| n.frame.contains(x, y));
-        let area = wb.a11y_children(None).into_iter().find(inside)?;
-        Some(wb.a11y_children(Some(area)).into_iter().find(inside).unwrap_or(area))
+        // Later nodes are drawn on top (the palette over everything).
+        let mut at = wb.a11y_children(None).into_iter().rev().find(inside)?;
+        while let Some(child) = wb.a11y_children(Some(at)).into_iter().rev().find(inside) {
+            at = child;
+        }
+        Some(at)
     })
     .flatten();
     match hit {
@@ -376,14 +401,31 @@ fn post(element: *mut AnyObject, name: &str) {
     unsafe { NSAccessibilityPostNotification(element, Retained::as_ptr(&name) as *mut NSString) };
 }
 
+/// Has `text` said without moving focus (high priority: it interrupts what's being read).
+fn announce(text: &str) {
+    // SAFETY: class methods of Foundation/AppKit classes, called on the main thread; the
+    // dictionary and string are autoreleased.
+    unsafe {
+        let app: *mut AnyObject = msg_send![class!(NSApplication), sharedApplication];
+        let priority: *mut AnyObject = msg_send![class!(NSNumber), numberWithInteger: 90isize];
+        let objects = [ns_string(text) as *mut AnyObject, priority];
+        let keys = [ns_string("AXAnnouncementKey") as *mut AnyObject, ns_string("AXPriorityKey") as *mut AnyObject];
+        let info: *mut AnyObject = msg_send![class!(NSDictionary), dictionaryWithObjects: objects.as_ptr(), forKeys: keys.as_ptr(), count: 2usize];
+        NSAccessibilityPostNotificationWithUserInfo(app, Retained::as_ptr(&NSString::from_str("AXAnnouncementRequested")) as *mut NSString, info);
+    }
+}
+
 /// After a frame: tells assistive technology what changed since `last` (focus, the focused
-/// text, its selection).
+/// text, its selection) and says the new announcement.
 pub fn after_frame(window: winit::window::WindowId, wb: &Workbench, last: &mut A11yState) {
     let now = wb.a11y_state();
     if now == *last {
         return;
     }
     let id = u64::from(window);
+    if let Some(text) = now.announcement.as_deref().filter(|_| now.announcement != last.announcement) {
+        announce(text);
+    }
     match now.focused {
         Some(node) => {
             let e = element(id, node);

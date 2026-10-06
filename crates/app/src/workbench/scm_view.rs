@@ -910,6 +910,7 @@ impl Workbench {
         let small = TextStyle::ui(12.0, dim);
         c.push_clip(list);
         self.scm.rows.clear();
+        self.a11y_list(super::a11y::SCM_LIST, Some(super::a11y::SIDEBAR), "Changes", list);
         for (row, &(section, item)) in rows.iter().enumerate().skip(first).take(visible) {
             let ry = list.y + row as f32 * ROW_H - self.scm.scroll;
             let rr = Rect::new(list.x, ry, list.w, ROW_H);
@@ -935,6 +936,8 @@ impl Workbench {
                     };
                     c.text_in(Rect::new(rr.x + 26.0, ry, rr.w, ROW_H), label, &TextStyle::ui(SMALL, fg).weight(700));
                     let n = items.len();
+                    let read = format!("{label}, {n} {}, {}", if n == 1 { "file" } else { "files" }, if collapsed { "collapsed" } else { "expanded" });
+                    self.a11y_item(super::a11y::SCM_LIST, row, read, rr.intersect(&list), false);
                     let bw = badge_w(c, n);
                     self.badge(c, rr.right() - 12.0 - bw, ry + 3.0, n);
                     self.hits.push((rr, Hit::Scm(ScmAction::ToggleSection(section))));
@@ -965,6 +968,8 @@ impl Workbench {
                     }
                     c.text_in(Rect::new(rr.x + 54.0 + nw, ry, rr.w, ROW_H), &dir, &small);
                     c.pop_clip();
+                    let read = if dir.is_empty() { name.clone() } else { format!("{name}, {dir}") };
+                    self.a11y_item(super::a11y::SCM_LIST, row, format!("{read}, {}", super::a11y::status_word(change.status)), rr.intersect(&list), false);
                     let letter = change.status.letter().to_string();
                     c.text_in(Rect::new(rr.right() - 22.0, ry, 14.0, ROW_H), &letter, &TextStyle::ui(UI, color));
                     self.hits.push((rr, row_hit));

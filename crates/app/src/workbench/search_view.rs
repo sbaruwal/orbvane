@@ -642,6 +642,7 @@ impl Workbench {
         let visible = (list.h / ROW_H).ceil() as usize + 1;
         c.push_clip(list);
         self.search.rows.clear();
+        self.a11y_list(super::a11y::SEARCH_LIST, Some(super::a11y::SIDEBAR), "Search Results", list);
         let mut hits = Vec::new();
         for (row, &(fi, mi)) in flat.iter().enumerate().skip(first).take(visible) {
             let y = list.y + row as f32 * ROW_H - self.search.scroll;
@@ -650,7 +651,7 @@ impl Workbench {
                 c.fill_rounded(super::row_pill(rr), self.color("list.hoverBackground"), super::ROW_RADIUS);
             }
             let file = &self.search.results[fi];
-            match mi {
+            let read = match mi {
                 None => {
                     let collapsed = self.search.collapsed.contains(&file.path);
                     let chevron = if collapsed { &icons::CHEVRON_RIGHT } else { &icons::CHEVRON_DOWN };
@@ -666,6 +667,8 @@ impl Workbench {
                     let n = file.matches.len();
                     let bw = self.badge_width(c, n);
                     self.badge(c, rr.right() - bw - 10.0, y + 3.0, n);
+                    let state = if collapsed { "collapsed" } else { "expanded" };
+                    format!("{name}, {dir}, {n} {}, {state}", if n == 1 { "result" } else { "results" })
                 }
                 Some(mi) => {
                     let m = &file.matches[mi];
@@ -693,10 +696,12 @@ impl Workbench {
                     }
                     c.text_in(Rect::new(x, y, 2000.0, ROW_H), after, &style);
                     c.pop_clip();
+                    format!("{}, line {}", m.preview.trim(), m.line + 1)
                 }
-            }
+            };
             self.search.rows.push((row, fi, mi));
             hits.push((rr, Hit::SearchRow(row)));
+            self.a11y_item(super::a11y::SEARCH_LIST, row, read, rr.intersect(&list), false);
         }
         c.pop_clip();
         self.hits.extend(hits);
