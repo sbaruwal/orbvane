@@ -278,9 +278,10 @@ In a chat:
 - **Editor tools:** the agent can ask Orbvane's language servers for definitions, references,
   hovers and symbols, and read the Problems list (`assistant.editorTools`).
 - Agents that speak the protocol read files through the editor, unsaved changes included, and
-  their edits land as one undo step. Claude Code and Codex read and write files on disk, so files
-  with unsaved changes are saved before each message (`assistant.saveBeforeSending`), and open
-  files reload when they change them.
+  their edits land as one undo step. Claude Code does too: its own file tools are swapped for the
+  editor's (`assistant.editorFiles`). Codex reads and writes files on disk, so files with unsaved
+  changes are saved before each message (`assistant.saveBeforeSending`), and open files reload
+  when it changes them.
 
 </details>
 
@@ -478,8 +479,8 @@ Every setting is listed with its description in the Settings editor.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
 - **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
-- **Assistant:** Claude Code and Codex read files from disk, so Orbvane saves your unsaved changes
-  before each message (`assistant.saveBeforeSending`).
+- **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
+  Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).
 
 Found something else? [Open an issue](https://github.com/sbaruwal/orbvane/issues/new/choose).
 

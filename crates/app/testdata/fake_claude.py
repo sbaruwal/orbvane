@@ -7,18 +7,41 @@ prompt mentions ("hello" → "goodbye") and a Bash command, both asked for with 
 control requests, then a last message that didn't stream and the result. A message with
 "expired" fails the way an expired sign-in does; one with "wait" waits for an interrupt;
 one with "make a plan" proposes a plan (`ExitPlanMode`). Mode and model changes are control
-requests. It prints its arguments' checks, MCP servers, modes and models on stderr.
+requests. With its own Edit turned off (`--disallowedTools`) it edits through the editor's
+`edit_file` tool (over the tools socket). It prints its arguments' checks, MCP servers, modes
+and models on stderr.
 """
 import json
 import re
+import socket
 import sys
 
 args = sys.argv[1:]
 need = ["--input-format", "stream-json", "--permission-prompt-tool", "stdio", "--permission-mode", "default", "--allow-dangerously-skip-permissions"]
 print("flags ok" if all(a in args for a in need) else "flags missing: %s" % args, file=sys.stderr, flush=True)
+tools_socket = None
 if "--mcp-config" in args:
     servers = json.loads(args[args.index("--mcp-config") + 1])["mcpServers"]
     print("mcp servers: %s" % sorted(servers), file=sys.stderr, flush=True)
+    tools_socket = servers.get("orbvane", {}).get("env", {}).get("ORBVANE_TOOLS_SOCKET")
+editor_files = "--disallowedTools" in args and "Edit" in args[args.index("--disallowedTools") + 1].split(",")
+if editor_files:
+    print("editor files", file=sys.stderr, flush=True)
+
+
+def editor_tool(name, arguments):
+    """Calls one of the editor's tools, as its MCP helper would."""
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(tools_socket)
+    s.sendall(json.dumps({"method": "tools/call", "params": {"name": name, "arguments": arguments}}).encode())
+    s.shutdown(socket.SHUT_WR)
+    reply = b""
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        reply += chunk
+    return json.loads(reply)["result"]
 
 next_request = 0
 session = "s1"
@@ -113,18 +136,23 @@ def turn(text, n):
     content = [{"type": "text", "text": "Using tools"}, {"type": "tool_use", "id": "todo%d" % n, "name": "TodoWrite", "input": todos}]
     found = re.search(r"The file open in the editor: (.+?)\)", text)
     edit = None
+    edit_tool = "mcp__orbvane__edit_file" if editor_files else "Edit"
     if found:
         edit = {"file_path": found.group(1), "old_string": "hello", "new_string": "goodbye"}
-        content.append({"type": "tool_use", "id": "edit%d" % n, "name": "Edit", "input": edit})
+        content.append({"type": "tool_use", "id": "edit%d" % n, "name": edit_tool, "input": edit})
     assistant(mid, content)
     tool_result("todo%d" % n, "ok")
     if edit:
-        if can_use("Edit", "edit%d" % n, edit):
-            with open(edit["file_path"]) as f:
-                old = f.read()
-            with open(edit["file_path"], "w") as f:
-                f.write(old.replace("hello", "goodbye", 1))
-            tool_result("edit%d" % n, "The file was updated.")
+        if can_use(edit_tool, "edit%d" % n, edit):
+            if editor_files:
+                r = editor_tool("edit_file", edit)
+                tool_result("edit%d" % n, r["content"][0]["text"], r["isError"])
+            else:
+                with open(edit["file_path"]) as f:
+                    old = f.read()
+                with open(edit["file_path"], "w") as f:
+                    f.write(old.replace("hello", "goodbye", 1))
+                tool_result("edit%d" % n, "The file was updated.")
         else:
             tool_result("edit%d" % n, "The user didn't allow it.", error=True)
     bash = {"command": "ls -1", "description": "List files"}

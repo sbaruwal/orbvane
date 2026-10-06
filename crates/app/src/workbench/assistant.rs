@@ -1073,19 +1073,26 @@ impl Workbench {
     fn new_session(&mut self, ci: usize) {
         let cwd = self.agent_cwd();
         let servers = self.mcp_servers();
+        let meta = self.session_meta(&servers);
         let chat = &mut self.assistant.chats[ci];
         if let Some(c) = &mut chat.client {
-            chat.session_req = Some(c.request("session/new", json!({ "cwd": cwd, "mcpServers": servers })));
+            chat.session_req = Some(c.request("session/new", json!({ "cwd": cwd, "mcpServers": servers, "_meta": meta })));
         }
+    }
+
+    /// What our own agents learn with a session: whether to use the editor's file tools.
+    fn session_meta(&self, servers: &[Value]) -> Value {
+        json!({ "orbvane.editorFiles": !servers.is_empty() && self.settings.bool("assistant.editorFiles") })
     }
 
     /// Continues the chat's earlier session with a new agent process.
     fn load_session(&mut self, ci: usize, session: String) {
         let cwd = self.agent_cwd();
         let servers = self.mcp_servers();
+        let meta = self.session_meta(&servers);
         let chat = &mut self.assistant.chats[ci];
         if let Some(c) = &mut chat.client {
-            chat.session_req = Some(c.request("session/load", json!({ "sessionId": session, "cwd": cwd, "mcpServers": servers })));
+            chat.session_req = Some(c.request("session/load", json!({ "sessionId": session, "cwd": cwd, "mcpServers": servers, "_meta": meta })));
             chat.loading = true;
         }
     }
@@ -1546,7 +1553,7 @@ impl Workbench {
 
     /// The agent writes `path`: an open document is edited (one undo step, cursors kept) and
     /// saved unless it had unsaved changes of its own; other files are written to disk.
-    fn agent_write(&mut self, path: &Path, content: &str) -> Result<(), String> {
+    pub(super) fn agent_write(&mut self, path: &Path, content: &str) -> Result<(), String> {
         let open = self.docs.iter().position(|d| d.as_ref().is_some_and(|d| d.buffer.path() == Some(path)));
         let Some(id) = open else {
             if let Some(dir) = path.parent() {
@@ -2256,6 +2263,7 @@ mod agent_tests {
             r.frame(bg, |c| wb.draw(c));
         } else {
             wb.assistant_tick();
+            wb.mcp_tick();
         }
     }
 
@@ -2590,9 +2598,10 @@ mod agent_tests {
     /// `claude`: the flags that make it ask us, the stream (thinking, text, the plan), an edit
     /// asked for with its diff and landing on disk, "allow for this chat" remembered for a
     /// command, a rejected edit, an expired sign-in offering Sign In, and Stop.
+    /// (Claude Code's own file tools; the editor's are `claude_code_edits_through_the_editor`.)
     #[test]
     fn a_conversation_with_claude_code() {
-        let (mut wb, dir) = workbench("claude", r#"{ "assistant.agent": "claude-code", "assistant.permissions": "edits" }"#);
+        let (mut wb, dir) = workbench("claude", r#"{ "assistant.agent": "claude-code", "assistant.permissions": "edits", "assistant.editorFiles": false }"#);
         let file = dir.join("notes.txt");
         std::fs::write(&file, "hello world\n").unwrap();
         let fake = dir.join("fake_claude.py");
@@ -2671,6 +2680,44 @@ mod agent_tests {
         wb.assistant_cancel();
         until(&mut wb, &mut r, "the stop", |wb| wb.assistant.cur().phase == Phase::Ready);
         assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Notice(n)) if n == "Stopped."));
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With the editor's file tools, Claude Code's edits go to the open document: unsaved
+    /// changes and all, as an undo step, without asking when the chat accepts edits.
+    #[test]
+    fn claude_code_edits_through_the_editor() {
+        let (mut wb, dir) = workbench("claude-files", r#"{ "assistant.agent": "claude-code", "assistant.permissions": "edits", "assistant.saveBeforeSending": false }"#);
+        let file = dir.join("notes.txt");
+        std::fs::write(&file, "hello world\n").unwrap();
+        let fake = dir.join("fake_claude.py");
+        std::fs::write(&fake, include_str!("../../testdata/fake_claude.py")).unwrap();
+        wb.assistant.server_override = Some(format!("exec python3 {} \"$@\"", fake.display()));
+        wb.assistant.probes.insert("claude-code", Probe { path: Some("/x/claude".into()), version: "2.1".into(), signed_in: true });
+        wb.open_file(&file);
+        // An unsaved change the agent should see.
+        if let Some((ed, doc)) = wb.active_mut() {
+            ed.set_selection(text::Selection::caret(text::Pos::new(0, 5)));
+            ed.type_text(doc, " unsaved");
+        }
+        let mut r = None;
+        type_and_send(&mut wb, "make it polite");
+        until(&mut wb, &mut r, "the command question", |wb| wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Permission(_))));
+        let i = wb.assistant.cur().entries.iter().position(|e| matches!(e, Entry::Permission(_))).unwrap();
+        let Entry::Permission(p) = &wb.assistant.cur().entries[i] else { unreachable!() };
+        assert_eq!(p.title, "Run `ls -1`", "the edit shouldn't be asked about in Accept Edits");
+        wb.assistant_answer(i, 0);
+        until(&mut wb, &mut r, "the end of the answer", |wb| wb.assistant.cur().phase == Phase::Ready);
+        let doc = wb.active_doc().unwrap();
+        assert_eq!((doc.buffer.text().as_str(), doc.buffer.is_dirty()), ("goodbye unsaved world\n", true));
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world\n");
+        assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")), "{:#?}", wb.assistant.cur().entries);
+        assert!(wb.output.lines("Assistant").iter().any(|l| l == "editor files"));
+        // Undo (in the editor) takes the agent's edit back.
+        wb.focus = Focus::Editor;
+        wb.run(crate::commands::Command::Undo);
+        assert_eq!(wb.active_doc().unwrap().buffer.text(), "hello unsaved world\n");
         wb.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }

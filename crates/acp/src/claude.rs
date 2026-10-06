@@ -17,7 +17,10 @@
 //!   chat" is remembered per tool (per command for Bash).
 //!
 //! Claude Code reads and writes files on disk itself (the editor saves before each message and
-//! reloads what changed). An expired sign-in answers the prompt with the sign-in error code, so
+//! reloads what changed), unless the editor offers its own file tools (`_meta`'s
+//! `orbvane.editorFiles` with `session/new`): then Claude Code's Read, Write and Edit are turned
+//! off and it uses the editor's (`mcp__orbvane__read_file`, `write_file`, `edit_file`), which see
+//! unsaved changes; they're shown and asked about like its own. An expired sign-in answers the prompt with the sign-in error code, so
 //! the editor offers to sign in.
 
 use std::collections::{HashMap, HashSet};
@@ -57,6 +60,24 @@ pub const MODES: [(&str, &str, &str, &str); 5] = [
     ("plan", "plan", "Plan", "Reads and plans; changes nothing until you approve the plan"),
     ("full", "bypassPermissions", "Full Access", "Edits and runs anything without asking"),
 ];
+
+/// The editor's file tools, as Claude Code names them, and the built-in tool each stands in for.
+const EDITOR_FILES: [(&str, &str); 3] = [("mcp__orbvane__read_file", "Read"), ("mcp__orbvane__write_file", "Write"), ("mcp__orbvane__edit_file", "Edit")];
+/// The editor's tools that only look (asked about never).
+const EDITOR_LOOKS: [&str; 7] = [
+    "mcp__orbvane__read_file",
+    "mcp__orbvane__diagnostics",
+    "mcp__orbvane__definition",
+    "mcp__orbvane__references",
+    "mcp__orbvane__hover",
+    "mcp__orbvane__document_symbols",
+    "mcp__orbvane__workspace_symbols",
+];
+
+/// The built-in tool an editor tool stands in for (else the tool itself).
+fn builtin(tool: &str) -> &str {
+    EDITOR_FILES.iter().find(|(t, _)| *t == tool).map_or(tool, |(_, b)| b)
+}
 
 /// What a control request of ours changes once Claude Code accepts it.
 enum Setting {
@@ -339,6 +360,11 @@ impl Bridge {
         }
         if let Some(servers) = mcp_config(&params["mcpServers"]) {
             args.extend(["--mcp-config".to_string(), servers.to_string()]);
+            if params["_meta"]["orbvane.editorFiles"].as_bool() == Some(true) {
+                args.extend(["--disallowedTools".to_string(), "Read,Write,Edit,MultiEdit,NotebookEdit".to_string()]);
+                let note = "Read, create and edit files with the orbvane MCP server's read_file, write_file and edit_file tools: they work on the editor's open files, unsaved changes included.";
+                args.extend(["--append-system-prompt".to_string(), note.to_string()]);
+            }
         }
         let session = match &resume {
             Some(session) => {
@@ -581,7 +607,14 @@ impl Bridge {
         let tool = r["tool_name"].as_str().unwrap_or("").to_string();
         let input = r["input"].clone();
         let rule = if tool == "Bash" { format!("Bash:{}", input["command"].as_str().unwrap_or("")) } else { tool.clone() };
-        if self.allowed.contains(&rule) {
+        // The editor's file edits follow the mode like Claude Code's own: allowed when it
+        // accepts edits, refused while planning; looking is always allowed.
+        let edits = builtin(&tool) != tool && !EDITOR_LOOKS.contains(&tool.as_str());
+        if edits && self.mode == "plan" {
+            let response = json!({ "behavior": "deny", "message": "Plan mode: no changes until the plan is approved." });
+            return self.claude_send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } }));
+        }
+        if self.allowed.contains(&rule) || EDITOR_LOOKS.contains(&tool.as_str()) || (edits && matches!(self.mode.as_str(), "acceptEdits" | "auto")) {
             let response = json!({ "behavior": "allow", "updatedInput": input });
             return self.claude_send(json!({ "type": "control_response", "response": { "subtype": "success", "request_id": request_id, "response": response } }));
         }
@@ -651,7 +684,7 @@ fn file_name(path: &str) -> String {
 /// A tool use's title and ACP kind.
 fn describe(tool: &str, input: &Value) -> (String, &'static str) {
     let s = |key: &str| input[key].as_str().unwrap_or("").to_string();
-    match tool {
+    match builtin(tool) {
         "Bash" => (format!("Run `{}`", s("command").trim()), "execute"),
         "Read" => (format!("Read {}", file_name(&s("file_path"))), "read"),
         "Edit" | "MultiEdit" => (format!("Edit {}", file_name(&s("file_path"))), "edit"),
@@ -683,7 +716,7 @@ fn edit_diffs(tool: &str, input: &Value) -> Vec<Value> {
         }
         Some(if e["replace_all"].as_bool() == Some(true) { text.replace(from, to) } else { text.replacen(from, to, 1) })
     };
-    let new = match tool {
+    let new = match builtin(tool) {
         "Write" => input["content"].as_str().map(String::from),
         "Edit" => old.as_deref().and_then(|t| edit(t, input)),
         "MultiEdit" => input["edits"].as_array().and_then(|edits| edits.iter().try_fold(old.clone()?, |t, e| edit(&t, e))),

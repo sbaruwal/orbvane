@@ -141,7 +141,7 @@ pub fn handle(msg: &Value, version: &str, forward: &mut dyn FnMut(&str, Value) -
                 "protocolVersion": if version_ok { asked } else { PROTOCOL_VERSION },
                 "capabilities": { "tools": { "listChanged": false } },
                 "serverInfo": { "name": "orbvane", "title": "Orbvane editor tools", "version": version },
-                "instructions": "Tools that ask the code editor the user has open: its language servers (definitions, references, hover, symbols) and its current diagnostics. Paths may be absolute or relative to the workspace folder; lines are 1-based.",
+                "instructions": "Tools that ask the code editor the user has open: its language servers (definitions, references, hover, symbols) and its current diagnostics, and files as the editor has them (read_file, write_file, edit_file: unsaved changes included, edits undoable). Paths may be absolute or relative to the workspace folder; lines are 1-based.",
             }))
         }
         "ping" => Ok(json!({})),

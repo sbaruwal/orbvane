@@ -1,7 +1,10 @@
 //! The editor's own tools for the agent (`assistant.editorTools`): an MCP server the agent
 //! starts (our executable as `acp::mcp`'s helper), bridged to this window over a socket. The
 //! tools answer from the language servers (definitions, references, hover, symbols) and the
-//! Problems the editor already has, so the agent sees what the user sees.
+//! Problems the editor already has, so the agent sees what the user sees. `read_file`,
+//! `write_file` and `edit_file` work on the open documents (unsaved changes included; an edit is
+//! one undo step, saved if the file had no unsaved changes) or the files on disk; Claude Code
+//! uses them instead of its own (`assistant.editorFiles`).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -91,6 +94,39 @@ fn tools() -> Value {
             "description": "A file's outline from the language server: its functions, types, fields... with line ranges, nested.",
             "inputSchema": { "type": "object", "properties": { "path": { "type": "string", "description": "The file (absolute, or relative to the workspace folder)" } }, "required": ["path"] },
             "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "read_file",
+            "title": "Read File",
+            "description": "Reads a file as the editor has it (unsaved changes included), with line numbers: `<number>\\t<line>`. Reads up to 2000 lines from `offset` (1-based).",
+            "inputSchema": { "type": "object", "properties": {
+                "file_path": { "type": "string", "description": "The file (absolute, or relative to the workspace folder)" },
+                "offset": { "type": "integer", "description": "The first line to read (1-based)" },
+                "limit": { "type": "integer", "description": "How many lines to read" },
+            }, "required": ["file_path"] },
+            "annotations": { "readOnlyHint": true },
+        },
+        {
+            "name": "write_file",
+            "title": "Write File",
+            "description": "Creates a file or replaces its whole content. An open file is changed in the editor (one undo step; saved if it had no unsaved changes).",
+            "inputSchema": { "type": "object", "properties": {
+                "file_path": { "type": "string", "description": "The file (absolute, or relative to the workspace folder)" },
+                "content": { "type": "string", "description": "The new content" },
+            }, "required": ["file_path", "content"] },
+            "annotations": { "destructiveHint": true },
+        },
+        {
+            "name": "edit_file",
+            "title": "Edit File",
+            "description": "Replaces text in a file as the editor has it (unsaved changes included): `old_string` must appear exactly once (or set `replace_all`). An open file is changed in the editor (one undo step; saved if it had no unsaved changes).",
+            "inputSchema": { "type": "object", "properties": {
+                "file_path": { "type": "string", "description": "The file (absolute, or relative to the workspace folder)" },
+                "old_string": { "type": "string", "description": "The text to replace, exactly as in the file (with enough context to be unique)" },
+                "new_string": { "type": "string", "description": "The text to put in its place" },
+                "replace_all": { "type": "boolean", "description": "Replace every occurrence" },
+            }, "required": ["file_path", "old_string", "new_string"] },
+            "annotations": { "destructiveHint": true },
         },
         {
             "name": "workspace_symbols",
@@ -297,6 +333,56 @@ impl Workbench {
         }
     }
 
+    /// `read_file`, `write_file` and `edit_file`: their answer, or what went wrong.
+    fn file_tool(&mut self, tool: &str, args: &Value) -> Result<String, String> {
+        let arg = args["file_path"].as_str().or(args["path"].as_str()).ok_or("file_path is missing")?;
+        let path = self.tool_path(arg);
+        let shown = self.display_path(&path);
+        match tool {
+            "read_file" => {
+                let text = self.tool_text(&path).ok_or_else(|| format!("{shown} doesn't exist or can't be read"))?;
+                let first = args["offset"].as_u64().unwrap_or(1).max(1) as usize;
+                let limit = args["limit"].as_u64().unwrap_or(2000) as usize;
+                let lines: Vec<&str> = text.lines().collect();
+                if lines.is_empty() {
+                    return Ok(format!("{shown} is empty."));
+                }
+                let out: Vec<String> = lines.iter().enumerate().skip(first - 1).take(limit).map(|(i, l)| format!("{}\t{l}", i + 1)).collect();
+                if out.is_empty() {
+                    return Err(format!("{shown} has {} lines", lines.len()));
+                }
+                let mut out = out.join("\n");
+                if first - 1 + limit < lines.len() {
+                    out.push_str(&format!("\n... ({} more lines; read on with offset {})", lines.len() - (first - 1 + limit), first + limit));
+                }
+                Ok(out)
+            }
+            "write_file" => {
+                let content = args["content"].as_str().ok_or("content is missing")?;
+                let existed = path.exists() || self.docs.iter().flatten().any(|d| d.buffer.path() == Some(path.as_path()));
+                self.agent_write(&path, content).map_err(|e| format!("Couldn't write {shown}: {e}"))?;
+                Ok(if existed { format!("Replaced {shown}.") } else { format!("Created {shown}.") })
+            }
+            _ => {
+                let (from, to) = (args["old_string"].as_str().ok_or("old_string is missing")?, args["new_string"].as_str().ok_or("new_string is missing")?);
+                if from.is_empty() {
+                    return Err("old_string is empty: use write_file to create a file".into());
+                }
+                let text = self.tool_text(&path).ok_or_else(|| format!("{shown} doesn't exist or can't be read"))?;
+                let count = text.matches(from).count();
+                let all = args["replace_all"].as_bool().unwrap_or(false);
+                let new = match count {
+                    0 => return Err(format!("old_string isn't in {shown} (read it again: it may have changed)")),
+                    1 => text.replacen(from, to, 1),
+                    _ if all => text.replace(from, to),
+                    n => return Err(format!("old_string is in {shown} {n} times: give more context, or set replace_all")),
+                };
+                self.agent_write(&path, &new).map_err(|e| format!("Couldn't edit {shown}: {e}"))?;
+                Ok(format!("Edited {shown} ({} replaced).", if all { count } else { 1 }))
+            }
+        }
+    }
+
     /// A file the agent named: absolute, relative to a workspace folder, or a `display_path`.
     fn tool_path(&self, arg: &str) -> PathBuf {
         let p = Path::new(arg);
@@ -324,6 +410,12 @@ impl Workbench {
             let path = args["path"].as_str().map(|p| self.tool_path(p));
             let text = self.diagnostics_text(path.as_deref());
             return req.answer_text(&text, false);
+        }
+        if matches!(tool.as_str(), "read_file" | "write_file" | "edit_file") {
+            return match self.file_tool(&tool, &args) {
+                Ok(text) => req.answer_text(&text, false),
+                Err(e) => req.answer_text(&e, true),
+            };
         }
         let mut call = Call { req: Some(req), tool, args, waiting: Vec::new(), answers: Vec::new(), errors: Vec::new(), busy: false, retry_at: None, started: Instant::now(), opened: None };
         match self.issue(&mut call) {
@@ -555,6 +647,55 @@ mod bridge_tests {
         assert!(missing.1 && missing.0.contains("isn't on line 2"), "{}", missing.0);
         assert!(unknown.1 && unknown.0.contains("no tool"), "{}", unknown.0);
         wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    /// `read_file`, `edit_file` and `write_file` on open documents (unsaved changes included)
+    /// and on files that aren't open.
+    #[test]
+    fn file_tools_work_on_what_the_editor_has() {
+        let dir = std::env::temp_dir().join(format!("orbvane-file-tools-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (dirty, clean, closed) = (dir.join("dirty.txt"), dir.join("clean.txt"), dir.join("closed.txt"));
+        for f in [&dirty, &clean, &closed] {
+            std::fs::write(f, "one\ntwo\ntwo\n").unwrap();
+        }
+        // SAFETY: every test that reads this wants the same scratch user data folder.
+        unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+        let mut wb = Workbench::new(Some(dir.clone()), &[dirty.clone(), clean.clone()], std::sync::Arc::new(|| {}));
+        let doc_of = |wb: &Workbench, p: &Path| wb.docs.iter().position(|d| d.as_ref().is_some_and(|d| d.buffer.path() == Some(p))).unwrap();
+        // An unsaved change in dirty.txt.
+        let d = doc_of(&wb, &dirty);
+        wb.edit_doc(d, vec![(Pos::new(0, 0), Pos::new(0, 3), "ONE".into())], false);
+
+        let read = wb.file_tool("read_file", &json!({ "file_path": "dirty.txt" })).unwrap();
+        assert_eq!(read, "1\tONE\n2\ttwo\n3\ttwo");
+        let part = wb.file_tool("read_file", &json!({ "file_path": "dirty.txt", "offset": 2, "limit": 1 })).unwrap();
+        assert_eq!(part, "2\ttwo\n... (1 more lines; read on with offset 3)");
+
+        // Not unique, then missing: errors that say what to do.
+        assert!(wb.file_tool("edit_file", &json!({ "file_path": "dirty.txt", "old_string": "two", "new_string": "2" })).unwrap_err().contains("2 times"));
+        assert!(wb.file_tool("edit_file", &json!({ "file_path": "dirty.txt", "old_string": "one", "new_string": "1" })).unwrap_err().contains("isn't in"));
+        // An open file with unsaved changes: edited in the editor, one undo step, not saved.
+        wb.file_tool("edit_file", &json!({ "file_path": dirty.to_string_lossy(), "old_string": "two", "new_string": "2", "replace_all": true })).unwrap();
+        let doc = wb.docs[d].as_ref().unwrap();
+        assert_eq!((doc.buffer.text().as_str(), doc.buffer.is_dirty()), ("ONE\n2\n2\n", true));
+        assert_eq!(std::fs::read_to_string(&dirty).unwrap(), "one\ntwo\ntwo\n");
+        // An open file without unsaved changes: edited and saved.
+        wb.file_tool("edit_file", &json!({ "file_path": "clean.txt", "old_string": "one", "new_string": "1" })).unwrap();
+        let c = doc_of(&wb, &clean);
+        assert_eq!((wb.docs[c].as_ref().unwrap().buffer.is_dirty(), std::fs::read_to_string(&clean).unwrap().as_str()), (false, "1\ntwo\ntwo\n"));
+        // Files that aren't open: on disk.
+        wb.file_tool("edit_file", &json!({ "file_path": "closed.txt", "old_string": "one", "new_string": "uno" })).unwrap();
+        assert_eq!(std::fs::read_to_string(&closed).unwrap(), "uno\ntwo\ntwo\n");
+        assert_eq!(wb.file_tool("write_file", &json!({ "file_path": "new/made.txt", "content": "hi\n" })).unwrap(), "Created new/made.txt.");
+        assert_eq!(std::fs::read_to_string(dir.join("new/made.txt")).unwrap(), "hi\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

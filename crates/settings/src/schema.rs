@@ -818,6 +818,13 @@ fn builtin() -> Vec<Setting> {
                 description: "Controls whether the agent can ask Orbvane's language servers for definitions, references, symbols and problems (offered to it as an MCP server).",
             },
             Setting {
+                key: "assistant.editorFiles",
+                default: "true",
+                kind: Kind::Bool,
+                section: Section::Assistant,
+                description: "Controls whether Claude Code reads and edits files through Orbvane (with `#assistant.editorTools#`): it sees unsaved changes, and its edits to open files are undo steps.",
+            },
+            Setting {
                 key: "extensions.autoCheckUpdates",
                 default: "true",
                 kind: Kind::Bool,
