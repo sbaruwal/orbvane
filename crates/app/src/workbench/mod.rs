@@ -543,9 +543,11 @@ pub struct Workbench {
     /// What this frame shows to assistive technology (`a11y.rs`).
     a11y: Vec<a11y::Node>,
     /// Controls named while drawing this frame: (hit, role, label, selected).
-    a11y_names: Vec<(Hit, a11y::Role, String, bool)>,
+    a11y_names: Vec<a11y::Named>,
     /// The controls assistive technology can press: (node, hit).
     a11y_presses: Vec<(u64, Hit)>,
+    /// What to say next without moving focus, numbered (`a11y_say`).
+    a11y_note: (u64, String),
     ime_area: Option<Rect>,
     mouse: (f32, f32),
     drag: Option<Drag>,
@@ -712,6 +714,7 @@ impl Workbench {
             a11y: Vec::new(),
             a11y_names: Vec::new(),
             a11y_presses: Vec::new(),
+            a11y_note: (0, String::new()),
             ime_area: None,
             mouse: (0.0, 0.0),
             drag: None,

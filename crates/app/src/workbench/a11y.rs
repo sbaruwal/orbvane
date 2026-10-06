@@ -19,6 +19,8 @@ pub const EDITORS: u64 = 3;
 pub const PANEL: u64 = 4;
 pub const STATUS_BAR: u64 = 5;
 pub const SECONDARY_SIDEBAR: u64 = 6;
+/// The Settings sheet (modal: what's inside it belongs to it, not to the areas below).
+pub const SETTINGS: u64 = 7;
 /// Lists: the Explorer's files, the palette's results, Problems, Source Control's changes and
 /// Search's results. Their rows are `item(list, index)`.
 pub const EXPLORER_LIST: u64 = 10;
@@ -26,6 +28,10 @@ pub const PALETTE_LIST: u64 = 11;
 pub const PROBLEMS_LIST: u64 = 12;
 pub const SCM_LIST: u64 = 13;
 pub const SEARCH_LIST: u64 = 14;
+/// Run and Debug's sections: `DEBUG_LIST + section`.
+pub const DEBUG_LIST: u64 = 20;
+/// The Assistant's conversation (its entries).
+pub const TRANSCRIPT_LIST: u64 = 30;
 /// An editor group's text area: `TEXT_AREA + group`.
 pub const TEXT_AREA: u64 = 100;
 /// The text fields drawn, in drawing order: `FIELD + index`.
@@ -52,6 +58,19 @@ pub enum Role {
     CheckBox,
     /// A single-line text field (`value`, `selection`).
     TextField,
+    /// A button that opens a menu of values (`value` = the current one).
+    PopUp,
+}
+
+/// A control named while it's drawn.
+pub(super) struct Named {
+    pub hit: Hit,
+    pub role: Role,
+    pub label: String,
+    pub selected: bool,
+    pub value: Option<String>,
+    /// Said after a pause (a setting's description).
+    pub help: String,
 }
 
 #[derive(Clone, Debug)]
@@ -70,11 +89,13 @@ pub struct Node {
     pub selection: (usize, usize),
     /// A text field that has the keyboard.
     pub focused: bool,
+    /// Said after a pause.
+    pub help: String,
 }
 
 impl Node {
     fn new(id: u64, parent: Option<u64>, role: Role, label: String, frame: Rect) -> Node {
-        Node { id, parent, role, label, frame, selected: false, value: None, selection: (0, 0), focused: false }
+        Node { id, parent, role, label, frame, selected: false, value: None, selection: (0, 0), focused: false, help: String::new() }
     }
 }
 
@@ -84,8 +105,10 @@ pub struct State {
     pub focused: Option<u64>,
     pub version: u64,
     pub selection: (usize, usize),
-    /// Said without moving focus (the selected suggestion while typing).
-    pub announcement: Option<String>,
+    /// The selected suggestion while typing (said without moving focus).
+    pub suggestion: Option<String>,
+    /// Counts what `a11y_say` asked to say (`a11y_note` is the last).
+    pub note: u64,
 }
 
 /// How a file's git status is said.
@@ -128,7 +151,12 @@ impl Workbench {
 
     /// Names the control drawn for `hit` (its text, or what it does when it's an icon).
     pub(super) fn a11y_name(&mut self, hit: Hit, role: Role, label: impl Into<String>, selected: bool) {
-        self.a11y_names.push((hit, role, label.into(), selected));
+        self.a11y_names.push(Named { hit, role, label: label.into(), selected, value: None, help: String::new() });
+    }
+
+    /// Names a control that has a value or a description too.
+    pub(super) fn a11y_name_with(&mut self, named: Named) {
+        self.a11y_names.push(named);
     }
 
     /// The end of a frame: the text fields drawn and the named controls become nodes, inside the
@@ -145,26 +173,44 @@ impl Workbench {
         self.a11y_presses.clear();
         let names = std::mem::take(&mut self.a11y_names);
         let hits = std::mem::take(&mut self.hits);
-        for &(rect, hit) in &hits {
-            let named = names.iter().rev().find(|n| n.0 == hit).map(|n| (n.1, n.2.clone(), n.3));
-            let Some((role, label, selected)) = named.or_else(|| self.control(hit)) else { continue };
+        // Under the Settings sheet's backdrop nothing can be reached.
+        let backdrop = hits.iter().position(|h| h.1 == Hit::Settings(super::settings_view::SettingsHit::Backdrop)).unwrap_or(0);
+        for &(rect, hit) in &hits[backdrop..] {
+            let named = names.iter().rev().find(|n| n.hit == hit).map(|n| (n.role, n.label.clone(), n.selected, n.value.clone(), n.help.clone()));
+            let Some((role, label, selected, value, help)) = named.or_else(|| self.control(hit).map(|(r, l, s)| (r, l, s, None, String::new()))) else {
+                continue;
+            };
             let id = control_id(hit);
+            // A text field drawn inside it while it's edited stands for it (with its name).
+            if role == Role::TextField {
+                let inside = |n: &Node| n.role == Role::TextField && n.id & FIELD != 0 && rect.contains(n.frame.x + n.frame.w / 2.0, n.frame.y + n.frame.h / 2.0);
+                if let Some(field) = self.a11y.iter_mut().find(|n| inside(n)) {
+                    if field.label.is_empty() {
+                        field.label = label;
+                    }
+                    field.help = help;
+                    continue;
+                }
+            }
             let parent = self.a11y_container(rect);
             // Later pushes win, as for clicks.
             self.a11y.retain(|n| n.id != id);
-            self.a11y.push(Node { selected, ..Node::new(id, parent, role, label, rect) });
+            self.a11y.push(Node { selected, value, help, ..Node::new(id, parent, role, label, rect) });
             self.a11y_presses.retain(|p| p.0 != id);
             self.a11y_presses.push((id, hit));
         }
         self.hits = hits;
     }
 
-    /// The innermost area or list around `r`'s center.
+    /// The innermost area or list around `r`'s center (inside the Settings sheet when it's
+    /// there, whatever is under it).
     fn a11y_container(&self, r: Rect) -> Option<u64> {
         let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+        let modal = self.a11y_node(SETTINGS).filter(|n| n.frame.contains(x, y)).is_some();
         self.a11y
             .iter()
             .filter(|n| matches!(n.role, Role::Group | Role::List) && n.frame.contains(x, y))
+            .filter(|n| !modal || n.id == SETTINGS || n.parent == Some(SETTINGS))
             .min_by(|a, b| (a.frame.w * a.frame.h).total_cmp(&(b.frame.w * b.frame.h)))
             .map(|n| n.id)
     }
@@ -236,6 +282,15 @@ impl Workbench {
             Hit::OutlineAction(i) => button(if i == 0 { "Collapse All" } else { "More Actions" }),
             Hit::ProblemsFilterMenu => button("Filter"),
             Hit::OutputChannels => button("Output Channel"),
+            Hit::DebugRowAction(s, row, k) => {
+                let full = self.a11y_node(item(DEBUG_LIST + s as u64, row)).map(|n| n.label.clone()).unwrap_or_default();
+                let line = full.split(", ").next().unwrap_or_default();
+                match k {
+                    9 => Some((Role::CheckBox, format!("Enable {line}"), full.ends_with(", enabled"))),
+                    0 => Some((Role::Button, format!("Edit {line}"), false)),
+                    _ => Some((Role::Button, format!("Remove {line}"), false)),
+                }
+            }
             Hit::DebugToolbar(b) => Some((Role::Button, words(&format!("{b:?}")), false)),
             Hit::DebugStartButton => button("Start Debugging"),
             Hit::DebugConfigPicker => button("Debug Configuration"),
@@ -257,6 +312,8 @@ impl Workbench {
             Hit::AssistantHistoryDelete(_) => button("Delete"),
             Hit::AssistantStop => button("Stop"),
             Hit::AssistantSend => button("Send"),
+            Hit::Settings(super::settings_view::SettingsHit::Close) => button("Close Settings"),
+            Hit::Settings(super::settings_view::SettingsHit::OpenJson) => button("Edit in settings.json"),
             Hit::Toast(_, super::notifications::ToastHit::Close) => button("Close Notification"),
             Hit::Welcome(super::welcome::WelcomeHit::Run(cmd)) => button(cmd.title()),
             _ => None,
@@ -279,7 +336,9 @@ impl Workbench {
 
     /// The nodes under `parent` (None: the window's areas), in drawing order.
     pub fn a11y_children(&self, parent: Option<u64>) -> Vec<u64> {
-        self.a11y.iter().filter(|n| n.parent == parent).map(|n| n.id).collect()
+        // The Settings sheet is modal: the window shows only it (and the palette over it).
+        let modal = parent.is_none() && self.a11y_node(SETTINGS).is_some();
+        self.a11y.iter().filter(|n| n.parent == parent && (!modal || n.id == SETTINGS || n.id == PALETTE_LIST)).map(|n| n.id).collect()
     }
 
     /// The node with the keyboard: the palette's selected row while it's open, the Explorer's
@@ -308,8 +367,18 @@ impl Workbench {
         self.a11y.iter().filter(|n| n.parent == Some(list) && n.selected).map(|n| n.id).collect()
     }
 
-    /// What to say without moving focus: the selected suggestion while the list is open.
-    fn a11y_announcement(&self) -> Option<String> {
+    /// Has `text` said without moving focus (an agent's reply, a question it asks).
+    pub(super) fn a11y_say(&mut self, text: impl Into<String>) {
+        self.a11y_note = (self.a11y_note.0 + 1, text.into());
+    }
+
+    /// What `a11y_say` asked to say last.
+    pub fn a11y_note(&self) -> &str {
+        &self.a11y_note.1
+    }
+
+    /// The selected suggestion while the list is open.
+    fn a11y_suggestion(&self) -> Option<String> {
         let comp = self.completion.as_ref()?;
         let item = comp.shown.get(comp.selected).map(|&(i, _)| &comp.items[i])?;
         Some(match &item.detail {
@@ -321,6 +390,12 @@ impl Workbench {
     /// A text field's node.
     fn a11y_field(&self, id: u64) -> Option<&Node> {
         self.a11y_node(id).filter(|n| n.role == Role::TextField)
+    }
+
+    /// Whether assistive technology can press `id` (or focus it, for a text field not being
+    /// edited).
+    pub fn a11y_pressable(&self, id: u64) -> bool {
+        self.a11y_presses.iter().any(|p| p.0 == id)
     }
 
     /// Group `g`'s active editor when it's a text editor.
@@ -338,8 +413,8 @@ impl Workbench {
 
     /// The whole text.
     pub fn a11y_value(&self, id: u64) -> String {
-        if let Some(f) = self.a11y_field(id) {
-            return f.value.clone().unwrap_or_default();
+        if let Some(v) = self.a11y_node(id).and_then(|n| n.value.clone()) {
+            return v;
         }
         self.a11y_editor(id).map(|(_, d)| d.buffer.text()).unwrap_or_default()
     }
@@ -433,8 +508,8 @@ impl Workbench {
 
     /// What notifications compare from frame to frame.
     pub fn a11y_state(&self) -> State {
-        let announcement = self.a11y_announcement();
-        let Some(id) = self.a11y_focused() else { return State { announcement, ..State::default() } };
+        let (suggestion, note) = (self.a11y_suggestion(), self.a11y_note.0);
+        let Some(id) = self.a11y_focused() else { return State { suggestion, note, ..State::default() } };
         let version = match self.a11y_field(id) {
             Some(f) => {
                 use std::hash::{Hash, Hasher};
@@ -444,7 +519,7 @@ impl Workbench {
             }
             None => self.a11y_editor(id).map_or(0, |(_, d)| d.buffer.version()),
         };
-        State { focused: Some(id), version, selection: self.a11y_selection(id), announcement }
+        State { focused: Some(id), version, selection: self.a11y_selection(id), suggestion, note }
     }
 }
 

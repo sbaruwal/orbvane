@@ -311,5 +311,28 @@ fn accessibility_tree_and_text() {
     let field = wb.a11y_focused().expect("the search field");
     let node = wb.a11y_node(field).unwrap();
     assert_eq!((node.role, wb.a11y_value(field).as_str(), wb.a11y_selection(field)), (A11yRole::TextField, "hé", (2, 0)));
+
+    // The Settings sheet: its own area, settings named with their values and descriptions.
+    wb.open_settings_ui();
+    draw(&mut wb, &mut r);
+    assert!(wb.a11y_children(None).contains(&a11y::SETTINGS));
+    let in_sheet = |n: &&a11y::Node| n.parent == Some(a11y::SETTINGS) || n.parent.and_then(|p| wb.a11y_node(p)).is_some_and(|p| p.parent == Some(a11y::SETTINGS));
+    let size = wb.a11y.iter().filter(in_sheet).find(|n| n.label == "Font Size").expect("Font Size");
+    assert_eq!(size.role, A11yRole::TextField);
+    assert!(!wb.a11y_value(size.id).is_empty() && !size.help.is_empty());
+    let save = wb.a11y.iter().filter(in_sheet).find(|n| n.label == "Auto Save").expect("Auto Save");
+    assert_eq!(save.role, A11yRole::PopUp);
+    assert!(!wb.a11y_value(save.id).is_empty());
+    // Nothing behind the sheet is reachable while it's open.
+    assert_eq!(wb.a11y_children(None), vec![a11y::SETTINGS]);
+    assert!(!wb.a11y.iter().filter(in_sheet).any(|n| n.label == "Match Case"));
+    assert!(wb.a11y.iter().filter(in_sheet).any(|n| n.role == A11yRole::Button && n.label == "Close Settings"));
+    wb.close_settings_ui();
+
+    // Announcements: each one is said once.
+    let before = wb.a11y_state();
+    wb.a11y_say("Done.");
+    assert_ne!(wb.a11y_state().note, before.note);
+    assert_eq!(wb.a11y_note(), "Done.");
     let _ = std::fs::remove_dir_all(&dir);
 }

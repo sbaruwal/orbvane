@@ -503,8 +503,10 @@ Every setting is listed with its description in the Settings sheet.
 - **Accessibility:** VoiceOver reads and follows the editor's text, the Explorer and the palette as
   you move through them, the Problems, Source Control and Search lists, and says the selected
   suggestion while you type. Buttons, tabs, toggles and text fields are named and can be pressed
-  or read; the Settings sheet's rows, the Debug view's trees and the Assistant's transcript aren't
-  read yet ([#2](https://github.com/sbaruwal/orbvane/issues/2)).
+  or read, and so are the Settings sheet's settings (with their descriptions), Run and Debug's
+  sections and the Assistant's conversation; an agent's reply and its questions are read out as
+  they arrive. The terminal's output and the Debug Console aren't read yet, and reports from
+  VoiceOver users are welcome ([#2](https://github.com/sbaruwal/orbvane/issues/2)).
 - **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
   Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).
 

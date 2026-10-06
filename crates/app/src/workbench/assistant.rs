@@ -190,6 +190,11 @@ pub(super) struct Chat {
 }
 
 impl Chat {
+    /// The agent's name as it introduced itself, else "The agent".
+    fn agent_name_or_default(&self) -> &str {
+        if self.agent_name.is_empty() { "The agent" } else { &self.agent_name }
+    }
+
     fn new(agent: String) -> Self {
         let now = unix_now();
         Self {
@@ -1413,6 +1418,15 @@ impl Workbench {
             chat.phase = Phase::Ready;
             chat.updated = unix_now();
             chat.unread = ci != self.assistant.active;
+            // The reply, read out when it's in the chat being shown.
+            let reply = chat.entries.iter().rev().take_while(|e| !matches!(e, Entry::User(_))).find_map(|e| match e {
+                Entry::Agent(t) => Some(t.clone()),
+                _ => None,
+            });
+            if let Some(reply) = reply.filter(|_| ci == self.assistant.active && result.is_ok()) {
+                self.a11y_say(plain_text(&reply));
+            }
+            let chat = &mut self.assistant.chats[ci];
             match result {
                 Ok(r) => match r["stopReason"].as_str().unwrap_or("end_turn") {
                     "end_turn" => {}
@@ -1516,8 +1530,12 @@ impl Workbench {
                 let title = call.title.clone().or_else(|| known.as_ref().map(|t| t.title.clone())).unwrap_or_else(|| "The agent wants to continue".into());
                 let content = call.content.clone().or_else(|| known.map(|t| t.content)).unwrap_or_default();
                 let diffs = content.into_iter().filter_map(|c| if let ToolContent::Diff(d) = c { Some(d) } else { None }).collect();
+                let said = format!("{} asks: {title}", chat.agent_name_or_default());
                 chat.entries.push(Entry::Permission(Permission { request: id, title, options: update::permission_options(params), answer: None, diffs }));
                 chat.scroll = 0.0;
+                if ci == self.assistant.active {
+                    self.a11y_say(said);
+                }
             }
             "fs/read_text_file" => {
                 let path = PathBuf::from(params["path"].as_str().unwrap_or(""));
@@ -2027,12 +2045,16 @@ impl Workbench {
         chat.scroll = chat.scroll.min(max);
         let top = r.y - (max - chat.scroll);
         let turn = (chat.started.map_or(0, |t| t.elapsed().as_millis() / 120) % 8) as u32;
+        let agent = chat.agent_name_or_default().to_string();
+        self.a11y_list(super::a11y::TRANSCRIPT_LIST, Some(super::a11y::SECONDARY_SIDEBAR), "Conversation", r);
         for (i, (off, h, lines)) in blocks.into_iter().enumerate() {
             let y0 = top + off;
             if y0 > r.bottom() || y0 + h < r.y {
                 continue;
             }
             let x = r.x + PAD;
+            let read = entry_read(&entries[i], &lines, &agent);
+            self.a11y_item(super::a11y::TRANSCRIPT_LIST, i, read, Rect::new(x, y0, w, h).intersect(&r), false);
             match &entries[i] {
                 Entry::User(_) => {
                     let bubble = Rect::new(x, y0, w, h);
@@ -2141,6 +2163,7 @@ impl Workbench {
     }
 
     fn small_button(&mut self, c: &mut Canvas, b: Rect, label: &str, hit: Hit) {
+        self.a11y_name(hit, super::a11y::Role::Button, label, false);
         let bg = if self.hovered(hit) { self.color("button.secondaryHoverBackground") } else { self.color("button.secondaryBackground") };
         c.fill_rounded(b, bg, 5.0);
         let st = TextStyle::ui(SMALL, self.color("button.secondaryForeground"));
@@ -2150,6 +2173,7 @@ impl Workbench {
     }
 
     fn option_button(&mut self, c: &mut Canvas, b: Rect, label: &str, primary: bool, hit: Hit) {
+        self.a11y_name(hit, super::a11y::Role::Button, label, false);
         let hovered = self.hovered(hit);
         let (bg, fg) = if primary {
             (if hovered { self.color("button.hoverBackground") } else { self.color("button.background") }, self.color("button.foreground"))
@@ -2318,7 +2342,11 @@ mod agent_tests {
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Agent(t) if t == "You said: make it polite")));
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Thought(_))));
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Plan(p) if p.len() == 2)));
+        // The question was said, and the conversation is a list VoiceOver reads.
+        assert!(wb.a11y_note().contains("asks:"), "{}", wb.a11y_note());
         if r.is_some() {
+            let list = super::super::a11y::TRANSCRIPT_LIST;
+            assert!(wb.a11y_children(Some(list)).iter().any(|&id| wb.a11y_node(id).unwrap().label.starts_with("You: make it polite")));
             // The question's buttons are drawn, and Review opens the change in a diff tab.
             assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantOption(i, 0)));
             wb.assistant_review(i, 0);
@@ -2331,6 +2359,8 @@ mod agent_tests {
         wb.assistant_answer(i, 0);
         until(&mut wb, &mut r, "the end of the answer", |wb| wb.assistant.cur().phase == Phase::Ready);
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.status == "completed")));
+        // The reply is read out when the turn ends.
+        assert_eq!(wb.a11y_note(), "You said: make it polite");
         assert!(matches!(&wb.assistant.cur().entries[i], Entry::Permission(p) if p.answer.as_deref() == Some("Allow")));
         // The open document changed, and was saved.
         let doc = wb.docs.iter().flatten().find(|d| d.buffer.path() == Some(file.as_path())).unwrap();
@@ -2822,4 +2852,51 @@ mod agent_tests {
         wb.shutdown();
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// How an entry of the transcript is read: who says it, then what it says as drawn.
+fn entry_read(e: &Entry, lines: &[(String, TextStyle)], agent: &str) -> String {
+    let text = lines.iter().map(|(l, _)| l.trim()).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+    match e {
+        Entry::User(_) => format!("You: {text}"),
+        Entry::Agent(_) => format!("{agent}: {text}"),
+        Entry::Thought(_) => format!("Thinking: {text}"),
+        Entry::Tool(t) => {
+            let status = match t.status.as_str() {
+                "completed" => "done",
+                "failed" => "failed",
+                "pending" => "waiting",
+                _ => "running",
+            };
+            format!("{text}, {status}")
+        }
+        Entry::Plan(p) => {
+            let steps: Vec<String> = p
+                .iter()
+                .map(|s| {
+                    let state = match s.status.as_str() {
+                        "completed" => "done",
+                        "in_progress" => "in progress",
+                        _ => "to do",
+                    };
+                    format!("{}, {state}", s.content)
+                })
+                .collect();
+            format!("Plan: {}", steps.join("; "))
+        }
+        Entry::Permission(p) => match &p.answer {
+            Some(answer) => format!("{agent} asked: {}. Answered: {answer}", p.title),
+            None => format!("{agent} asks: {}", p.title),
+        },
+        Entry::Auth(_) | Entry::Notice(_) | Entry::Action(..) => text,
+    }
+}
+
+/// Markdown as it's read aloud: no emphasis marks, code fences or heading signs.
+fn plain_text(md: &str) -> String {
+    md.lines()
+        .filter(|l| !l.trim_start().starts_with("```"))
+        .map(|l| l.trim_start_matches(['#', '>', ' ']).replace(['*', '`'], ""))
+        .collect::<Vec<_>>()
+        .join("\n")
 }

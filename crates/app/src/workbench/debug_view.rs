@@ -330,6 +330,8 @@ impl Workbench {
         let selected = self.debug.view.selected.clone();
         let hover = self.hover_hit;
         let mut hits = Vec::new();
+        let list = super::a11y::DEBUG_LIST + section as u64;
+        self.a11y_list(list, Some(super::a11y::SIDEBAR), &super::calm(TITLES[section]), r);
         c.push_clip(r);
         let first = (scroll / ROW_H) as usize;
         let visible = (r.h / ROW_H).ceil() as usize + 1;
@@ -395,6 +397,17 @@ impl Workbench {
                 c.text_in(Rect::new(rr.right() - w - 10.0, y, w + 2.0, ROW_H), &line.right, &st);
             }
             hits.push((rr.intersect(&r), Hit::DebugRow(section, i)));
+            let mut read: String = line.runs.iter().map(|(t, _)| t.as_str()).collect::<String>().trim().to_string();
+            if !line.right.is_empty() {
+                read = format!("{read}, {}", line.right.split_whitespace().collect::<Vec<_>>().join(" "));
+            }
+            if let Some(open) = line.twistie {
+                read += if open { ", expanded" } else { ", collapsed" };
+            }
+            if let Some(enabled) = checkbox {
+                read += if enabled { ", enabled" } else { ", disabled" };
+            }
+            self.a11y_item(list, i, read, rr.intersect(&r), is_selected || is_focused_frame);
         }
         c.pop_clip();
         // Hits: rows first so their actions (pushed after) win.

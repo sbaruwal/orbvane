@@ -157,6 +157,8 @@ fn element_class() -> &'static AnyClass {
         b.add_method(sel!(accessibilityRole), role as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilitySubrole), subrole as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityPerformPress), press as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(accessibilityHelp), help as unsafe extern "C-unwind" fn(_, _) -> _);
+        b.add_method(sel!(setAccessibilityFocused:), set_focused as unsafe extern "C-unwind" fn(_, _, _));
         b.add_method(sel!(accessibilityLabel), label as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityFrame), frame as unsafe extern "C-unwind" fn(_, _) -> _);
         b.add_method(sel!(accessibilityParent), parent as unsafe extern "C-unwind" fn(_, _) -> _);
@@ -203,6 +205,7 @@ unsafe extern "C-unwind" fn role(this: &AnyObject, _: Sel) -> *mut NSString {
         Some(A11yRole::Tab) => "AXRadioButton",
         Some(A11yRole::CheckBox) => "AXCheckBox",
         Some(A11yRole::TextField) => "AXTextField",
+        Some(A11yRole::PopUp) => "AXPopUpButton",
         Some(A11yRole::Group) | None => "AXGroup",
     };
     ns_string(role)
@@ -218,11 +221,24 @@ unsafe extern "C-unwind" fn subrole(this: &AnyObject, _: Sel) -> *mut NSString {
 /// Presses a button, tab or check box: queued like a click, since what it does may open a
 /// dialog, which mustn't run inside VoiceOver's question.
 unsafe extern "C-unwind" fn press(this: &AnyObject, _: Sel) -> Bool {
-    let Some(k) = key_of(this).filter(|k| matches!(node_role(*k), Some(A11yRole::Button | A11yRole::Tab | A11yRole::CheckBox))) else {
+    let Some(k) = key_of(this).filter(|k| with_workbench(k.window, |wb| wb.a11y_pressable(k.node)).unwrap_or(false)) else {
         return Bool::NO;
     };
     crate::queue(&crate::shared(), crate::Input::Press(winit::window::WindowId::from(k.window), k.node));
     Bool::YES
+}
+
+/// Focusing a text field that isn't being edited (a setting's input) starts editing it.
+unsafe extern "C-unwind" fn set_focused(this: &AnyObject, _: Sel, focused: Bool) {
+    if focused.as_bool() && key_of(this).and_then(node_role) == Some(A11yRole::TextField) {
+        // SAFETY: as `press`.
+        unsafe { press(this, sel!(accessibilityPerformPress)) };
+    }
+}
+
+unsafe extern "C-unwind" fn help(this: &AnyObject, _: Sel) -> *mut NSString {
+    let help = key_of(this).and_then(|k| with_workbench(k.window, |wb| wb.a11y_node(k.node).map(|n| n.help.clone())).flatten()).unwrap_or_default();
+    if help.is_empty() { null_mut() } else { ns_string(&help) }
 }
 
 unsafe extern "C-unwind" fn label(this: &AnyObject, _: Sel) -> *mut NSString {
@@ -280,7 +296,7 @@ unsafe extern "C-unwind" fn value(this: &AnyObject, _: Sel) -> *mut AnyObject {
     let Some(k) = key_of(this) else { return null_mut() };
     match node_role(k) {
         Some(A11yRole::TextArea) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
-        Some(A11yRole::TextField) => ns_string(&text(this, |wb, id| wb.a11y_value(id))) as *mut AnyObject,
+        Some(A11yRole::TextField | A11yRole::PopUp) => ns_string(&with_workbench(k.window, |wb| wb.a11y_value(k.node)).unwrap_or_default()) as *mut AnyObject,
         Some(A11yRole::Item) => ns_string(&with_workbench(k.window, |wb| wb.a11y_node(k.node).map(|n| n.label.clone())).flatten().unwrap_or_default()) as *mut AnyObject,
         // Tabs and check boxes: 1 when selected or on.
         Some(A11yRole::Tab | A11yRole::CheckBox) => {
@@ -454,8 +470,11 @@ pub fn after_frame(window: winit::window::WindowId, wb: &Workbench, last: &mut A
         return;
     }
     let id = u64::from(window);
-    if let Some(text) = now.announcement.as_deref().filter(|_| now.announcement != last.announcement) {
+    if let Some(text) = now.suggestion.as_deref().filter(|_| now.suggestion != last.suggestion) {
         announce(text);
+    }
+    if now.note != last.note {
+        announce(wb.a11y_note());
     }
     match now.focused {
         Some(node) => {

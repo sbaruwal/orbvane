@@ -444,12 +444,15 @@ impl Workbench {
         c.push_layer();
         c.fill(full, self.color("widget.shadow").with_alpha(0.45));
         self.hits.push((full, Hit::Settings(SettingsHit::Backdrop)));
+        // The text fields under the backdrop can't be reached.
+        crate::widgets::take_drawn_fields();
         let w = (full.w - 80.0).clamp(320.0, SHEET_MAX_W).min(full.w - 16.0);
         let h = (full.h - 96.0).clamp(240.0, SHEET_MAX_H).min(full.h - 16.0);
         let sheet = Rect::new((full.x + (full.w - w) / 2.0).round(), (full.y + (full.h - h) / 2.0).round(), w, h);
         c.shadow(sheet, SHEET_RADIUS, self.color("widget.shadow"));
         c.fill_rounded(sheet, self.color("editor.background"), SHEET_RADIUS);
         self.hits.push((sheet, Hit::Settings(SettingsHit::Body)));
+        self.a11y_area(super::a11y::SETTINGS, "Settings", sheet);
         let focused = self.focus == Focus::Settings && self.palette.is_none();
         c.push_clip(sheet);
         self.draw_settings_editor(c, sheet, focused);
@@ -681,6 +684,7 @@ impl Workbench {
             let text = if searching { format!("{label} ({count})") } else { label.to_string() };
             c.text_in(Rect::new(rr.x + 10.0 + level as f32 * 12.0, rr.y, rr.w - 16.0 - level as f32 * 12.0, rr.h), &text, &st);
             self.hits.push((rr.intersect(&r), hit));
+            self.a11y_name(hit, super::a11y::Role::Tab, text, active);
             y += 26.0;
         }
         c.pop_clip();
@@ -746,6 +750,27 @@ impl Workbench {
             self.icon_button(c, Rect::new(tx + 6.0, ty - 1.0, 20.0, 20.0), &icons::GEAR, hit, color);
         }
 
+        {
+            use super::a11y::{Named, Role};
+            let help = plain_description(s);
+            let value = self.shown_value(s);
+            let named = match s.kind {
+                Kind::Bool => Some(Named { hit: Hit::Settings(SettingsHit::Checkbox(index)), role: Role::CheckBox, label: name.clone(), selected: value.as_bool() == Some(true), value: None, help }),
+                Kind::Enum(_) | Kind::Theme => {
+                    Some(Named { hit: Hit::Settings(SettingsHit::Dropdown(index)), role: Role::PopUp, label: name.clone(), selected: false, value: Some(value_label(&value)), help })
+                }
+                Kind::Number { .. } | Kind::String => {
+                    Some(Named { hit: Hit::Settings(SettingsHit::Input(index)), role: Role::TextField, label: name.clone(), selected: false, value: Some(value_label(&value)), help })
+                }
+                Kind::Json(_) => None,
+            };
+            if let Some(named) = named {
+                self.a11y_name_with(named);
+            }
+            if row_hovered {
+                self.a11y_name(Hit::Settings(SettingsHit::Gear(index)), Role::Button, format!("More Actions for {name}"), false);
+            }
+        }
         let desc_style = TextStyle::ui(UI, self.color("descriptionForeground"));
         let mut y = ty + TITLE_H + 4.0;
         for line in lines {
