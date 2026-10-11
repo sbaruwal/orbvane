@@ -78,7 +78,7 @@ pub enum DebugPick {
     /// Start the configuration with this name.
     Config(String),
     /// Create `launch.json` with a configuration for this debug type.
-    NewConfig(&'static str),
+    NewConfig(String),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -666,10 +666,16 @@ impl Workbench {
         if self.folder().is_none() {
             return self.debug_error("Open a folder to create a launch.json file.");
         }
-        let choices = DEBUGGERS
-            .iter()
-            .map(|&(ty, label)| Item { label: label.to_string(), detail: String::new(), matches: Vec::new(), shortcut: None, action: Action::Debug(DebugPick::NewConfig(ty)), group: None, kind: None })
-            .collect();
+        // The built-in adapters, then the described ones; those for the active file first.
+        let file = self.active_doc().and_then(|d| Some((d.buffer.path()?.to_path_buf(), d.lang.id())));
+        let mut choices: Vec<(bool, Item)> = DEBUGGERS.iter().map(|&(ty, label)| (false, debugger_item(ty, label, ""))).collect();
+        for a in self.debug_adapters() {
+            let for_file = file.as_ref().is_some_and(|(p, lang)| a.debugs(p, lang));
+            let installed = crate::servers::find_binary(&a.command).is_some() || Path::new(&a.command).is_file();
+            choices.push((for_file, debugger_item(&a.ty, &a.label, if installed { "" } else { "not installed" })));
+        }
+        choices.sort_by_key(|(for_file, _)| !for_file);
+        let choices = choices.into_iter().map(|(_, item)| item).collect();
         self.palette = Some(Palette::with_picker(Picker { placeholder: "Select debugger".into(), choices }));
     }
 
@@ -679,8 +685,13 @@ impl Workbench {
                 self.debug.selected_config = Some(name);
                 self.debug_start(false);
             }
-            DebugPick::NewConfig(ty) => self.create_launch_json(ty),
+            DebugPick::NewConfig(ty) => self.create_launch_json(&ty),
         }
+    }
+
+    /// The described debug adapters: built in, and the `debug.adapters` setting's.
+    pub(super) fn debug_adapters(&self) -> Vec<crate::debuggers::Adapter> {
+        crate::debuggers::all(&self.settings.get("debug.adapters"))
     }
 
     /// Debug: Open 'launch.json' (creating it first when there's none).
@@ -704,7 +715,11 @@ impl Workbench {
                 .and_then(|p| p["main"].as_str().map(|m| m.trim_start_matches("./").to_string())),
             _ => std::fs::read_to_string(folder.join("Cargo.toml")).ok().and_then(|t| cargo_package_name(&t)),
         };
-        let text = launch_template(ty, hint.as_deref());
+        let described = self.debug_adapters().into_iter().find(|a| a.ty == ty).filter(|a| !a.configurations.is_empty());
+        let text = match described {
+            Some(a) => described_template(&a.configurations),
+            None => launch_template(ty, hint.as_deref()),
+        };
         if !path.exists() {
             if let Err(e) = std::fs::create_dir_all(path.parent().unwrap()).and_then(|_| std::fs::write(&path, text)) {
                 return self.debug_error(&format!("Unable to create 'launch.json' file ({e})."));
@@ -822,7 +837,26 @@ impl Workbench {
                 }
                 dap::Client::in_process("node", waker, jsdebug::serve)
             }
-            _ => return self.debug_error(&format!("Configured debug type '{ty}' is not supported.")),
+            _ => {
+                // A described adapter (built in, or from the `debug.adapters` setting).
+                let Some(a) = self.debug_adapters().into_iter().find(|a| a.handles(&ty)) else {
+                    return self.debug_error(&format!("Configured debug type '{ty}' is not supported."));
+                };
+                let command = if a.command.contains('/') { Some(PathBuf::from(&a.command)).filter(|p| p.is_file()) } else { crate::servers::find_binary(&a.command) };
+                let Some(command) = command else {
+                    let install = a.install.as_deref().map_or(String::new(), |i| format!(" {i}"));
+                    return self.debug_error(&format!("Couldn't find {} for {}.{install}", a.command, a.label));
+                };
+                if let Some(request) = &a.request {
+                    config["request"] = json!(request);
+                }
+                let args = a.args_for(&config);
+                match a.start {
+                    crate::debuggers::Start::Stdio => dap::Client::spawn(&command, &args, &cwd, &a.ty, waker),
+                    crate::debuggers::Start::ClientAddr => dap::Client::spawn_client_addr(&command, &args, &cwd, &a.ty, waker),
+                    crate::debuggers::Start::Server => dap::Client::spawn_server(&command, &args, &cwd, &a.ty, waker),
+                }
+            }
         };
         let client = match started {
             Ok(c) => c,
@@ -1455,6 +1489,18 @@ fn hover_expression(line: &str, col: usize) -> Option<String> {
 /// A new `launch.json` with a first configuration for debug type `ty`, written as text so the
 /// keys keep the order. `package` is the Cargo package (debugged from its debug build),
 /// or for Node the program in package.json's `main` (else the current file).
+/// A "Select debugger" row.
+fn debugger_item(ty: &str, label: &str, detail: &str) -> Item {
+    Item { label: label.to_string(), detail: detail.to_string(), matches: Vec::new(), shortcut: None, action: Action::Debug(DebugPick::NewConfig(ty.to_string())), group: None, kind: None }
+}
+
+/// A new launch.json with a described adapter's configurations.
+fn described_template(configurations: &[Value]) -> String {
+    let file = json!({ "version": "0.2.0", "configurations": configurations });
+    let text = serde_json::to_string_pretty(&file).unwrap_or_default();
+    format!("// Hover over an attribute to see what it does; type a quote for suggestions.\n{text}\n")
+}
+
 fn launch_template(ty: &str, package: Option<&str>) -> String {
     let fields: Vec<(&str, String)> = match ty {
         "node" => vec![
@@ -1501,7 +1547,7 @@ fn launch_template(ty: &str, package: Option<&str>) -> String {
     };
     let body = fields.iter().map(|(k, v)| format!("            \"{k}\": {v}")).collect::<Vec<_>>().join(",\n");
     format!(
-        "{{\n    // Use IntelliSense to learn about possible attributes.\n    // Hover to view descriptions of existing attributes.\n    \"version\": \"0.2.0\",\n    \"configurations\": [\n        {{\n{body}\n        }}\n    ]\n}}\n"
+        "{{\n    // Hover over an attribute to see what it does; type a quote for suggestions.\n    \"version\": \"0.2.0\",\n    \"configurations\": [\n        {{\n{body}\n        }}\n    ]\n}}\n"
     )
 }
 
@@ -1607,6 +1653,46 @@ mod tests {
         unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
         let wb = Workbench::new(Some(dir.clone()), &[], std::sync::Arc::new(|| {}));
         (wb, dir, file)
+    }
+
+    /// An adapter described in the `debug.adapters` setting (the fake one, over stdio): it's
+    /// offered for its files, writes its launch.json and runs a session to a stop.
+    #[test]
+    fn a_described_adapter_runs_a_session() {
+        let launch = r#"{ "version": "0.2.0", "configurations": [
+            { "type": "fake", "request": "launch", "name": "Fake", "program": "${workspaceFolder}/prog" } ] }"#;
+        let (mut wb, dir, file) = demo_folder("described", launch, "");
+        let adapter = dir.join("fake_dap.py");
+        let described = json!([{ "type": "fake", "label": "Fake Debugger", "command": adapter, "files": ["*.demo"],
+            "configurations": [{ "type": "fake", "request": "launch", "name": "Fake: Run", "program": "${file}" }] }]);
+        wb.settings.set(settings::Scope::Workspace, "debug.adapters", Some(described)).unwrap();
+        assert!(wb.debug_adapters().iter().any(|a| a.ty == "fake" && a.debugs(&file, "")));
+        assert!(described_template(&wb.debug_adapters().iter().find(|a| a.ty == "fake").unwrap().configurations).contains("\"Fake: Run\""));
+
+        wb.toggle_breakpoint_at(&file, 6);
+        wb.debug_start(false);
+        wait_for(&mut wb, "the stop", |wb| wb.debug.session.as_ref().is_some_and(|s| s.state == State::Stopped && !s.frames.is_empty()));
+        assert_eq!(wb.debug.session.as_ref().unwrap().frames[0].name, "dbgdemo::add");
+        wb.debug_stop();
+        wait_for(&mut wb, "the end", |wb| wb.debug.session.is_none());
+
+        // The same adapter as one that listens on a port we pick.
+        let server = dir.join("fake_dap_server.py");
+        std::fs::write(&server, include_str!("../../testdata/fake_dap_server.py")).unwrap();
+        let listening = json!([{ "type": "fake", "label": "Fake Debugger", "command": "python3", "args": [server, "{port}"], "start": "server" }]);
+        wb.settings.set(settings::Scope::Workspace, "debug.adapters", Some(listening)).unwrap();
+        wb.debug_start(false);
+        wait_for(&mut wb, "the stop over TCP", |wb| wb.debug.session.as_ref().is_some_and(|s| s.state == State::Stopped && !s.frames.is_empty()));
+        wb.debug_stop();
+        wait_for(&mut wb, "the end", |wb| wb.debug.session.is_none());
+
+        // Missing: says how to install it.
+        let missing = json!([{ "type": "fake", "label": "Fake Debugger", "command": "no-such-adapter-xyz", "install": "Get it from the shop." }]);
+        wb.settings.set(settings::Scope::Workspace, "debug.adapters", Some(missing)).unwrap();
+        wb.debug_start(false);
+        assert!(wb.debug.session.is_none());
+        assert!(wb.debug.console.iter().any(|l| l.text.contains("Couldn't find no-such-adapter-xyz for Fake Debugger. Get it from the shop.")), "{:?}", wb.debug.console.iter().map(|l| &l.text).collect::<Vec<_>>());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A whole session against `testdata/fake_dap.py`: breakpoints, a stop, variables, watches,

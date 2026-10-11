@@ -60,6 +60,7 @@ const BUILTIN_TOC: &[(&str, u8, Option<Section>)] = &[
     ("Terminal", 1, Some(Section::Terminal)),
     ("Source Control", 1, Some(Section::SourceControl)),
     ("Testing", 1, Some(Section::Testing)),
+    ("Debug", 1, Some(Section::Debug)),
     ("Language Servers", 1, Some(Section::LanguageServers)),
     ("Assistant", 1, Some(Section::Assistant)),
     ("Extensions", 1, Some(Section::Extensions)),

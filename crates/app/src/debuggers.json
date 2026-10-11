@@ -1,0 +1,61 @@
+[
+    {
+        "type": "coreclr",
+        "label": "C# (.NET)",
+        "command": "netcoredbg",
+        "args": ["--interpreter=vscode"],
+        "start": "stdio",
+        "languages": ["csharp"],
+        "files": ["*.cs", "*.csproj", "*.sln"],
+        "install": "Install netcoredbg from its releases (github.com/Samsung/netcoredbg) and put it on your PATH.",
+        "configurations": [
+            {
+                "type": "coreclr",
+                "request": "launch",
+                "name": ".NET: Launch",
+                "program": "${workspaceFolder}/bin/Debug/<target framework>/<project>.dll",
+                "args": [],
+                "cwd": "${workspaceFolder}",
+                "stopAtEntry": false
+            }
+        ]
+    },
+    {
+        "type": "rdbg",
+        "label": "Ruby (rdbg)",
+        "command": "rdbg",
+        "args": ["--open", "--host", "127.0.0.1", "--port", "{port}", "--command", "--", "ruby", "{program}"],
+        "start": "server",
+        "request": "attach",
+        "languages": ["ruby"],
+        "files": ["*.rb", "Gemfile", "Rakefile"],
+        "install": "gem install debug",
+        "configurations": [
+            {
+                "type": "rdbg",
+                "request": "launch",
+                "name": "Ruby: Debug Current File",
+                "program": "${file}"
+            }
+        ]
+    },
+    {
+        "type": "dart",
+        "label": "Dart",
+        "command": "dart",
+        "args": ["debug_adapter"],
+        "start": "stdio",
+        "languages": ["dart"],
+        "files": ["*.dart", "pubspec.yaml"],
+        "install": "Install the Dart SDK (dart.dev/get-dart).",
+        "configurations": [
+            {
+                "type": "dart",
+                "request": "launch",
+                "name": "Dart: Run",
+                "program": "bin/main.dart",
+                "cwd": "${workspaceFolder}"
+            }
+        ]
+    }
+]

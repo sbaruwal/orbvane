@@ -7,7 +7,7 @@
     "version": { "type": "string", "description": "Version of this file format.", "default": "0.2.0" },
     "configurations": {
       "type": "array",
-      "description": "List of configurations. Add new configurations or edit existing ones by using IntelliSense.",
+      "description": "List of configurations. Add new configurations or edit existing ones; suggestions show as you type.",
       "items": {
         "defaultSnippets": [
           { "label": "LLDB DAP: Launch", "description": "Debug a program with lldb-dap.", "body": { "type": "lldb-dap", "request": "launch", "name": "${1:Launch}", "program": "^\"\\${workspaceFolder}/${2:program}\"", "args": [], "cwd": "^\"\\${workspaceFolder}\"" } },

@@ -12,6 +12,7 @@ mod contributions;
 mod config;
 mod conflicts;
 mod cursors;
+mod debuggers;
 mod diff_view;
 mod editor;
 mod emmet;

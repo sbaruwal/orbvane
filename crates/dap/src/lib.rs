@@ -115,6 +115,49 @@ impl Client {
         Ok(Self::started(Some(child), out, rx, adapter_id))
     }
 
+    /// Starts an adapter that listens for us (`rdbg --open --port {port}`): `{port}` in `args`
+    /// becomes a free port, which we connect to once it's listening. Its stdout (the program's
+    /// output) arrives as `output` events, its stderr as `Incoming::Log`.
+    pub fn spawn_server(command: &Path, args: &[String], cwd: &Path, adapter_id: &str, waker: Waker) -> io::Result<Self> {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
+        let args: Vec<String> = args.iter().map(|a| a.replace("{port}", &port.to_string())).collect();
+        let mut child = Command::new(command)
+            .args(&args)
+            .current_dir(cwd)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        let (tx, rx) = mpsc::channel();
+        forward_lines(child.stdout.take().unwrap(), Some("stdout"), tx.clone(), waker.clone())?;
+        forward_lines(child.stderr.take().unwrap(), None, tx.clone(), waker.clone())?;
+        // Messages queue up until we're connected.
+        let (out, out_rx) = mpsc::channel::<Value>();
+        thread::Builder::new().name("dap connect".into()).spawn(move || {
+            let deadline = std::time::Instant::now() + CONNECT_TIMEOUT;
+            let stream = loop {
+                match std::net::TcpStream::connect(("127.0.0.1", port)) {
+                    Ok(stream) => break Some(stream),
+                    Err(_) if std::time::Instant::now() < deadline => thread::sleep(std::time::Duration::from_millis(50)),
+                    Err(_) => break None,
+                }
+            };
+            let Some(stream) = stream else {
+                let _ = tx.send(Incoming::Log("The debug adapter didn't start listening.".into()));
+                let _ = tx.send(Incoming::Exited);
+                return waker();
+            };
+            let Ok(reader) = stream.try_clone() else { return };
+            let Ok(inner) = start_stream(Box::new(reader), Box::new(stream), tx, waker) else { return };
+            for msg in out_rx {
+                if inner.send(msg).is_err() {
+                    return;
+                }
+            }
+        })?;
+        Ok(Self::started(Some(child), out, rx, adapter_id))
+    }
+
     /// Connects to an adapter that is already listening (`dlv --headless --listen=host:port`).
     pub fn connect(addr: &str, adapter_id: &str, waker: Waker) -> io::Result<Self> {
         let stream = std::net::TcpStream::connect(addr)?;
