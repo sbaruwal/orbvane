@@ -39,6 +39,8 @@ enum Reply {
     Icon(String, Option<Vec<u8>>),
     /// An extension's page: its details, its README (or an error) and its package.json.
     Page(String, Option<GalleryExtension>, Result<String, String>, Option<Value>),
+    /// A package.json fetched for a list row's badge (None: couldn't).
+    Manifest(String, Option<Value>),
     /// (id, display name, an error, whether it was an update)
     Installed(String, String, Result<(), String>, bool),
     /// The newer versions of installed extensions; `manual` when the user asked.
@@ -77,6 +79,10 @@ pub(super) struct Marketplace {
     icon_next: Instant,
     /// Pages: the README (or a message), and the package.json once fetched.
     pub manifests: HashMap<String, Value>,
+    /// Manifests to fetch for list rows' badges (id, URL), and how many are being fetched.
+    manifest_queue: std::collections::VecDeque<(String, String)>,
+    manifest_wanted: HashSet<String>,
+    manifest_busy: usize,
     pub installing: HashSet<String>,
     /// Newer versions of installed extensions, by id.
     pub updates: HashMap<String, GalleryExtension>,
@@ -104,6 +110,9 @@ impl Default for Marketplace {
             icon_busy: false,
             icon_next: Instant::now(),
             manifests: HashMap::new(),
+            manifest_queue: std::collections::VecDeque::new(),
+            manifest_wanted: HashSet::new(),
+            manifest_busy: 0,
             installing: HashSet::new(),
             updates: HashMap::new(),
             checking: false,
@@ -189,10 +198,13 @@ impl Workbench {
         let typed = m.typed.map(|t| t + SEARCH_DELAY);
         let check = (crate::contributions::with(|r| !r.gallery.is_empty() || !r.native.is_empty()) && self.settings.bool("extensions.autoCheckUpdates")).then_some(m.next_check);
         let icon = (!m.icon_busy && !m.icon_queue.is_empty()).then_some(m.icon_next);
-        [typed, check, icon].into_iter().flatten().min()
+        // Manifests asked for while drawing start on the next frame.
+        let manifests = (m.manifest_busy < 4 && !m.manifest_queue.is_empty()).then(Instant::now);
+        [typed, check, icon, manifests].into_iter().flatten().min()
     }
 
     pub(super) fn marketplace_tick(&mut self) {
+        self.fetch_manifests();
         // Search when typing pauses.
         let want = self.marketplace_query();
         if want.is_none() {
@@ -286,6 +298,12 @@ impl Workbench {
                 let image = bytes.and_then(|b| crate::imageio::decode(&b).ok()).map(Arc::new);
                 self.marketplace.icons.insert(url, image);
             }
+            Reply::Manifest(id, manifest) => {
+                self.marketplace.manifest_busy -= 1;
+                if let Some(m) = manifest {
+                    self.marketplace.manifests.insert(id, m);
+                }
+            }
             Reply::Page(id, details, readme, manifest) => {
                 if let Some(d) = details {
                     self.marketplace.known.insert(id.clone(), d);
@@ -347,6 +365,35 @@ impl Workbench {
 
     /// Fetches what an extension's marketplace page shows: its details (search results leave
     /// out the README and reviews), README and package.json.
+    /// What of an extension works here, once its manifest is known (installed, or fetched for
+    /// its row or page).
+    pub(super) fn extension_capabilities(&self, id: &str) -> Option<extensions::capabilities::Capabilities> {
+        let native = crate::contributions::with(|reg| reg.native.contains(id)) || self.marketplace.known.get(id).is_some_and(|g| g.source == Source::Orbvane);
+        let installed = crate::contributions::with(|reg| reg.get(id).map(|e| e.manifest.clone()));
+        let manifest = installed.or_else(|| self.marketplace.manifests.get(id).cloned())?;
+        Some(extensions::capabilities::of_manifest(&manifest, native))
+    }
+
+    /// Asks for a marketplace extension's package.json for its badge (once; a few at a time,
+    /// started by `marketplace_tick`).
+    pub(super) fn want_manifest(&mut self, e: &GalleryExtension) {
+        let id = e.id();
+        if self.marketplace.manifests.contains_key(&id) || !self.marketplace.manifest_wanted.insert(id.clone()) {
+            return;
+        }
+        let url = gallery::manifest_url(&self.marketplace.service, e);
+        self.marketplace.manifest_queue.push_back((id, url));
+    }
+
+    /// Starts queued manifest fetches, up to four at once.
+    fn fetch_manifests(&mut self) {
+        while self.marketplace.manifest_busy < 4 {
+            let Some((id, url)) = self.marketplace.manifest_queue.pop_front() else { break };
+            self.marketplace.manifest_busy += 1;
+            self.gallery_spawn(move || Reply::Manifest(id, gallery::get(&url).ok().and_then(|b| serde_json::from_slice(&b).ok())));
+        }
+    }
+
     pub(super) fn fetch_extension_page(&mut self, e: &GalleryExtension) {
         let (id, base) = (e.id(), self.marketplace.service.clone());
         let (namespace, name) = (e.namespace.clone(), e.name.clone());
@@ -560,6 +607,13 @@ mod tests {
         // "A dusky theme." matches too.
         assert_eq!(sections[0].items.iter().map(|i| i.id()).collect::<Vec<_>>(), ["me.dusk"]);
         assert_eq!(sections[1].items.iter().map(|i| i.id()).collect::<Vec<_>>(), ["acme.theme-x"]);
+
+        // Its row asks for its package.json for the badge (no page needed).
+        let found = sections[1].items[0].gallery().cloned().unwrap();
+        wb.want_manifest(&found);
+        wait_for(&mut wb, "the row's manifest", |wb| wb.marketplace.manifests.contains_key("acme.theme-x"));
+        assert_eq!(wb.extension_capabilities("acme.theme-x").map(|c| c.verdict), Some(extensions::capabilities::Verdict::Works));
+        wb.marketplace.manifests.clear();
 
         // Its page fetches the manifest; Install installs it (rows count across sections).
         wb.extensions_click(ExtHit::Row(1), 0.0, 0.0);

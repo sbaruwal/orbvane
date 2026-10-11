@@ -7,6 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use extensions::capabilities::Verdict;
 use extensions::gallery::{GalleryExtension, Source};
 use extensions::Extension;
 use render::{Canvas, Image, Rect, TextStyle};
@@ -425,12 +426,20 @@ impl Workbench {
             }
         }
         let verified = matches!(item, Item::Gallery(g) if g.verified);
-        // Open VSX extensions: only their package.json's contributions work here. (Where a
-        // marketplace row comes from is on its page.)
-        let tag = match &installed {
-            Some(e) if e.has_js_code() => Some("Contributions only"),
-            _ => None,
-        };
+        // How much of it works here (marketplace rows fetch their package.json for it). The
+        // page says what works and what doesn't.
+        if let Item::Gallery(g) = item {
+            self.want_manifest(g);
+        }
+        let caps = self.extension_capabilities(&id);
+        let tag = caps.as_ref().map(|c| c.verdict.badge());
+        let tag_color = match caps.as_ref().map(|c| c.verdict) {
+            Some(Verdict::Works) => self.color("testing.iconPassed"),
+            Some(Verdict::Partly) => self.color("editorWarning.foreground"),
+            Some(Verdict::Nothing) => self.color("errorForeground"),
+            None => self.color("descriptionForeground"),
+        }
+        .with_alpha(alpha);
         let publisher = match (&installed, enabled) {
             (Some(_), false) => format!("{publisher} (Disabled)"),
             (Some(e), true) if e.linked => format!("{publisher} (from {})", e.path.display()),
@@ -438,8 +447,14 @@ impl Workbench {
         };
         let tag = tag.map(|t| format!("·  {t}"));
         let tag_w = tag.as_ref().map_or(0.0, |t| c.measure(t, &dim) + 8.0);
-        let pw = right - x - 6.0 - if verified { 18.0 } else { 0.0 } - tag_w;
-        let publisher = elide(c, &publisher, &dim, pw.max(0.0));
+        let mut pw = right - x - 6.0 - if verified { 18.0 } else { 0.0 } - tag_w;
+        // Too narrow for the publisher: the badge matters more.
+        let (publisher, verified, tag) = if pw < 40.0 && tag.is_some() {
+            pw = 0.0;
+            (String::new(), false, tag.map(|t| t.trim_start_matches(['·', ' ']).to_string()))
+        } else {
+            (elide(c, &publisher, &dim, pw.max(0.0)), verified, tag)
+        };
         c.push_clip(Rect::new(x, row.y, (right - x).max(0.0), row.h));
         let mut tw = c.text_in(Rect::new(x, row.y + 40.0, pw.max(0.0), 18.0), &publisher, &dim);
         if verified {
@@ -447,7 +462,10 @@ impl Workbench {
             tw += 18.0;
         }
         if let Some(tag) = &tag {
-            tw += 8.0 + c.text_in(Rect::new(x + tw + 8.0, row.y + 40.0, tag_w, 18.0), tag, &dim);
+            let gap = if tw > 0.0 { 8.0 } else { 0.0 };
+            let (dot, rest) = tag.split_at(if tag.starts_with('·') { tag.find(' ').map_or(0, |i| i + 1) } else { 0 });
+            let dw = if dot.is_empty() { 0.0 } else { c.text_in(Rect::new(x + tw + gap, row.y + 40.0, tag_w, 18.0), dot, &dim) };
+            tw += gap + dw + c.text_in(Rect::new(x + tw + gap + dw, row.y + 40.0, tag_w - dw, 18.0), rest, &dim.color(tag_color));
         }
         // Installs and rating after the publisher (marketplace rows), while there's room.
         if let Some(g) = item.gallery().filter(|g| g.source == Source::OpenVsx) {
@@ -868,14 +886,11 @@ impl Workbench {
                 notes.push(format!("Contributes: {}", counts.iter().map(|(what, n)| format!("{what} ({n})")).collect::<Vec<_>>().join(", ")));
             }
         }
-        let javascript = match (&installed, self.marketplace.manifests.get(id)) {
-            (Some(e), _) => e.has_js_code(),
-            (None, Some(m)) => extensions::gallery::runs_javascript(m),
-            (None, None) => false,
-        };
         let native = crate::contributions::with(|reg| reg.native.contains(id)) || gallery.as_ref().is_some_and(|ge| ge.source == Source::Orbvane);
-        if javascript {
-            notes.push("Its code is JavaScript, which Orbvane doesn't run; what it contributes in package.json works.".into());
+        let caps = self.extension_capabilities(id).filter(|_| !native);
+        if let Some(caps) = caps {
+            // First: whether it works here matters more than the counts.
+            notes.insert(0, caps.sentence());
         } else if native {
             let from = gallery.as_ref().and_then(|ge| ge.repository.clone()).map_or(String::new(), |r| format!(" from {r}"));
             notes.push(format!("From Orbvane's extension registry, built from source{from}."));

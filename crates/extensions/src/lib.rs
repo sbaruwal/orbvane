@@ -7,6 +7,7 @@
 //! An extension is a `package.json` (see `manifest`), and optionally a program
 //! the editor runs and talks to over JSON-RPC (see the `orbvane-extension` crate).
 
+pub mod capabilities;
 pub mod catalog;
 pub mod ed25519;
 pub mod gallery;

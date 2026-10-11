@@ -283,6 +283,12 @@ pub fn target_platform() -> String {
 
 /// The latest version of `namespace.name`: the build for this Mac if there is one, else the
 /// universal one.
+/// Where an extension's package.json is: its own link, else Open VSX's file address for the
+/// version (search results don't carry the link).
+pub fn manifest_url(base: &str, e: &GalleryExtension) -> String {
+    e.manifest.clone().unwrap_or_else(|| format!("{base}/api/{}/{}/{}/file/package.json", encode(&e.namespace), encode(&e.name), encode(&e.version)))
+}
+
 pub fn details(base: &str, namespace: &str, name: &str) -> Result<GalleryExtension, String> {
     let url = format!("{base}/api/{}/{}", encode(namespace), encode(name));
     let v = get_json(&format!("{url}/{}", target_platform())).or_else(|_| get_json(&url))?;
