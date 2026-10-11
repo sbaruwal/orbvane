@@ -83,7 +83,8 @@ impl Workbench {
         let Some(stroke) = k.stroke() else { return true };
         let stroke = keymap::format_stroke(&stroke);
         // A second stroke makes a chord; a third starts over.
-        p.input = if p.input.is_empty() || p.input.contains(' ') { stroke } else { format!("{} {stroke}", p.input) };
+        let text = if p.input.is_empty() || p.input.contains(' ') { stroke } else { format!("{} {stroke}", p.input) };
+        p.set_input(&text);
         let taken: Vec<&str> = keymap::parse_keys(&p.input)
             .map(|(f, s)| keymap::all().into_iter().filter(|b| b.first == f && b.second == s && b.command != cmd).map(|b| b.command.title()).collect())
             .unwrap_or_default();

@@ -800,7 +800,7 @@ mod tests {
         // An input box, then a notification with a button that fills an output channel.
         wb.ext_execute("wordCount.find", Vec::new(), None);
         wait_for(&mut wb, "the input box", |wb| wb.palette.as_ref().is_some_and(|p| p.input_box.is_some()));
-        wb.palette.as_mut().unwrap().input = "two".into();
+        wb.palette.as_mut().unwrap().set_input("two");
         wb.palette_accept();
         wait_for(&mut wb, "the answer", |wb| wb.toast_list().iter().any(|t| t.1.contains("'two' appears 2 times")));
         let (toast, _, actions) = wb.toast_list().into_iter().find(|t| t.1.contains("'two'")).unwrap();

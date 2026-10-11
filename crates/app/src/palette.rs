@@ -87,7 +87,12 @@ pub struct Picker {
 }
 
 pub struct Palette {
+    /// What's typed (kept equal to `field`'s text; read this one).
     pub input: String,
+    /// The input's caret and selection.
+    pub field: crate::widgets::TextField,
+    /// Where the input was drawn (for clicks).
+    pub input_rect: render::Rect,
     pub selected: usize,
     pub scroll: usize,
     pub items: Vec<Item>,
@@ -103,7 +108,22 @@ pub const MAX_VISIBLE: usize = 12;
 
 impl Palette {
     pub fn new(input: &str) -> Self {
-        Self { input: input.to_string(), selected: 0, scroll: 0, items: Vec::new(), picker: None, input_box: None, has_repo: false, message: None }
+        let mut field = crate::widgets::TextField::default();
+        field.set_text(input);
+        Self { input: input.to_string(), field, input_rect: render::Rect::default(), selected: 0, scroll: 0, items: Vec::new(), picker: None, input_box: None, has_repo: false, message: None }
+    }
+
+    /// Replaces what's typed, with the caret at the end.
+    pub fn set_input(&mut self, text: &str) {
+        self.input = text.to_string();
+        self.field.set_text(text);
+    }
+
+    /// The field after code changed `input` directly: follows it (caret at the end).
+    pub fn sync_field(&mut self) {
+        if self.field.text != self.input {
+            self.field.set_text(&self.input.clone());
+        }
     }
 
     /// An input box, prefilled with `value`.

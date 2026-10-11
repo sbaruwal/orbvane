@@ -1263,6 +1263,11 @@ impl Workbench {
         if editing && self.focus == Focus::Editor && self.active_editor().is_some_and(|e| e.is_special()) {
             return;
         }
+        // The palette's input takes the clipboard commands while it's open (they arrive through
+        // the menu, not as keys); undo does nothing there rather than undo the editor behind it.
+        if self.palette.is_some() && matches!(cmd, Command::Cut | Command::Copy | Command::Paste | Command::SelectAll | Command::Undo | Command::Redo) {
+            return self.palette_clipboard(cmd);
+        }
         match cmd {
             Command::Ext(_) => self.ext_execute(cmd.id(), Vec::new(), None),
             Command::NewFile => self.new_file(),
@@ -1957,6 +1962,7 @@ impl Workbench {
             return;
         }
         let Some(mut p) = self.palette.take() else { return };
+        p.sync_field();
         let mut changed = false;
         let before = p.selected;
         match &k.key {
@@ -1973,23 +1979,14 @@ impl Workbench {
             Key::Down => p.move_selection(1),
             Key::PageUp => p.move_selection(-(MAX_VISIBLE as isize)),
             Key::PageDown => p.move_selection(MAX_VISIBLE as isize),
-            Key::Backspace => {
-                if k.cmd || k.alt {
-                    p.input.clear();
-                } else {
-                    p.input.pop();
-                }
-                changed = true;
-            }
-            _ if !k.cmd && !k.ctrl => {
-                if let Some(t) = &k.text {
-                    if !t.chars().any(char::is_control) {
-                        p.input.push_str(t);
-                        changed = true;
-                    }
+            // Typing, the caret and selection keys, deleting: the field.
+            Key::Char(t) if !k.cmd && !k.ctrl && t.chars().any(char::is_control) => {}
+            _ => {
+                if p.field.key(k) == crate::widgets::FieldEvent::Changed {
+                    p.input = p.field.text.clone();
+                    changed = true;
                 }
             }
-            _ => {}
         }
         if changed {
             self.refresh_palette(&mut p);
@@ -1999,6 +1996,41 @@ impl Workbench {
         self.palette = Some(p);
         if moved {
             self.preview_picked_theme();
+            self.preview_quick_access();
+        }
+    }
+
+    /// Cut, copy, paste and select all in the palette's input (a password is never copied).
+    fn palette_clipboard(&mut self, cmd: Command) {
+        let Some(mut p) = self.palette.take() else { return };
+        p.sync_field();
+        let password = p.input_box.as_ref().is_some_and(|b| b.password);
+        let mut changed = false;
+        match cmd {
+            Command::SelectAll => p.field.select_all(),
+            Command::Copy | Command::Cut if !password => {
+                let text = if cmd == Command::Cut { p.field.cut() } else { p.field.copy() };
+                if let (Some(text), Some(cb)) = (text, &mut self.clipboard) {
+                    let _ = cb.set_text(text);
+                }
+                changed = cmd == Command::Cut;
+            }
+            Command::Paste => {
+                if let Some(text) = self.clipboard.as_mut().and_then(|cb| cb.get_text().ok()) {
+                    // One line: line breaks become spaces.
+                    p.field.insert(&text.trim_end_matches(['\n', '\r']).replace(['\n', '\r'], " "));
+                    changed = true;
+                }
+            }
+            _ => {}
+        }
+        if changed {
+            p.input = p.field.text.clone();
+            self.refresh_palette(&mut p);
+            self.validate_input(&mut p);
+        }
+        self.palette = Some(p);
+        if changed {
             self.preview_quick_access();
         }
     }
@@ -2235,7 +2267,11 @@ impl Workbench {
                     }
                     self.palette_accept();
                 }
-                Hit::PaletteBox => {}
+                Hit::PaletteBox => {
+                    if let Some(p) = self.palette.as_mut().filter(|p| p.input_rect.contains(x, y)) {
+                        p.field.click(x, shift);
+                    }
+                }
                 _ => self.cancel_palette(),
             }
             return;
@@ -4082,21 +4118,26 @@ impl Workbench {
         let big = TextStyle::ui(17.0, self.color("input.foreground"));
         let text_rect = Rect::new(input.x + 46.0, input.y, input.w - 62.0, input.h);
         c.push_clip(input);
-        let tw = if p.input.is_empty() {
-            c.text_fit(text_rect, p.placeholder(), &big.color(self.color("input.placeholderForeground")))
-                .min(0.0)
-        } else if p.input_box.as_ref().is_some_and(|b| b.password) {
+        let password = p.input_box.as_ref().is_some_and(|b| b.password);
+        let placeholder = p.placeholder().to_string();
+        let (placeholder_fg, selection, caret_on) = (self.color("input.placeholderForeground"), self.color("editor.selectionBackground"), self.caret_on());
+        if password && !p.input.is_empty() {
+            // Dots, and the caret after them (no selection: it's never copied).
             let dots = "•".repeat(p.input.chars().count());
-            c.text_in(text_rect, &dots, &big)
-        } else {
-            c.text_in(text_rect, &p.input, &big)
-        };
-        if self.caret_on() {
-            c.fill(Rect::new(text_rect.x + tw + 1.0, input.y + (input.h - 22.0) / 2.0, 1.5, 22.0), self.color("focusBorder"));
+            let tw = c.text_in(text_rect, &dots, &big);
+            if caret_on {
+                c.fill(Rect::new(text_rect.x + tw + 1.0, input.y + (input.h - 22.0) / 2.0, 1.5, 22.0), self.color("focusBorder"));
+            }
+            let text_y = input.y + ((input.h - big.line_height) / 2.0).round();
+            crate::ime::caret(Rect::new(text_rect.x + tw + 1.0, text_y, 1.0, big.line_height), &big, self.color("quickInput.background"), "", text_rect);
+        } else if let Some(p) = self.palette.as_mut() {
+            // The field: caret where it is, the selection shown, clicks place the caret.
+            p.sync_field();
+            p.input_rect = text_rect;
+            p.field.draw(c, text_rect, &big, &placeholder, placeholder_fg, true, caret_on, selection);
         }
-        let text_y = input.y + ((input.h - big.line_height) / 2.0).round();
-        crate::ime::caret(Rect::new(text_rect.x + tw + 1.0, text_y, 1.0, big.line_height), &big, self.color("quickInput.background"), "", text_rect);
         c.pop_clip();
+        let Some(p) = self.palette.as_ref() else { return };
         let line = if error.is_some() { self.color("inputValidation.errorBorder") } else { self.color("widget.border") };
         c.fill(Rect::new(bx.x + 1.0, input.bottom(), bx.w - 2.0, 1.0), line);
 

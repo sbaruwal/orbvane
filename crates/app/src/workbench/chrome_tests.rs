@@ -184,6 +184,39 @@ fn welcome_page() {
 /// Input methods: on while something takes text, composed text shown at the caret and not in the
 /// document, the commit typed as one edit, and the candidate list placed at the caret.
 #[test]
+fn palette_input_edits_like_a_text_field() {
+    let dir = std::env::temp_dir().join(format!("orbvane-palette-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("notes.txt"), "hello\n").unwrap();
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[dir.join("notes.txt")], std::sync::Arc::new(|| {}));
+    let key = |wb: &mut Workbench, key: crate::input::Key, text: Option<&str>| {
+        wb.key(crate::input::KeyInput { key, text: text.map(Into::into), cmd: false, shift: false, alt: false, ctrl: false });
+    };
+    wb.run(Command::QuickOpen);
+    for ch in ["a", "b"] {
+        key(&mut wb, crate::input::Key::Char(ch.into()), Some(ch));
+    }
+    // The caret moves, and typing goes where it is.
+    key(&mut wb, crate::input::Key::Left, None);
+    key(&mut wb, crate::input::Key::Char("c".into()), Some("c"));
+    assert_eq!(wb.palette.as_ref().unwrap().input, "acb");
+    // Select All is the input's, and typing replaces the selection.
+    wb.run(Command::SelectAll);
+    key(&mut wb, crate::input::Key::Char("x".into()), Some("x"));
+    assert_eq!(wb.palette.as_ref().unwrap().input, "x");
+    // The editor behind it isn't touched by the clipboard and undo commands.
+    for cmd in [Command::Paste, Command::Undo, Command::Cut] {
+        wb.run(cmd);
+    }
+    assert!(wb.palette.is_some());
+    assert_eq!(wb.active_doc().unwrap().buffer.text(), "hello\n");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn input_method_composition() {
     let dir = std::env::temp_dir().join(format!("orbvane-ime-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
