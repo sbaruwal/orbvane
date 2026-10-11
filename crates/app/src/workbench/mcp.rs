@@ -396,7 +396,7 @@ impl Workbench {
     }
 
     /// The text of `path`: the open document's (unsaved changes and all), else the file's.
-    fn tool_text(&self, path: &Path) -> Option<String> {
+    pub(super) fn tool_text(&self, path: &Path) -> Option<String> {
         match self.docs.iter().flatten().find(|d| d.buffer.path() == Some(path)) {
             Some(d) => Some(d.buffer.text()),
             None => std::fs::read_to_string(path).ok(),

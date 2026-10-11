@@ -105,9 +105,20 @@ pub(super) enum Entry {
     /// Sign-in choices: (method id, name).
     Auth(Vec<(String, String)>),
     Notice(String),
+    /// The files a turn changed: a checkpoint to undo it (and redo it).
+    Changes(Changes),
     /// A message with buttons: what to do about the agent (never saved).
     #[serde(skip)]
     Action(String, Vec<(String, AgentAction)>),
+}
+
+/// The files one turn of the agent changed. `files` holds each file's other version: as it was
+/// before the turn (None: the turn created it), or after it once the changes are undone, so
+/// undoing and redoing are the same swap.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(super) struct Changes {
+    pub files: Vec<(PathBuf, Option<String>)>,
+    pub undone: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -187,9 +198,20 @@ pub(super) struct Chat {
     /// `session/set_mode` and `session/set_model` waiting: (request, the id asked for).
     mode_req: Option<(i64, String)>,
     model_req: Option<(i64, String)>,
+    /// The files the running turn changed, as they were before it (first change wins).
+    turn: Vec<(PathBuf, Option<String>)>,
+    /// What to tell the agent with the next message: files the user undid its changes to.
+    reverted: Vec<PathBuf>,
 }
 
 impl Chat {
+    /// Keeps `path`'s text from before this turn first changed it.
+    fn remember(&mut self, path: PathBuf, before: Option<String>) {
+        if !self.turn.iter().any(|(p, _)| *p == path) {
+            self.turn.push((path, before));
+        }
+    }
+
     /// The agent's name as it introduced itself, else "The agent".
     fn agent_name_or_default(&self) -> &str {
         if self.agent_name.is_empty() { "The agent" } else { &self.agent_name }
@@ -232,6 +254,8 @@ impl Chat {
             cur_model: None,
             mode_req: None,
             model_req: None,
+            turn: Vec::new(),
+            reverted: Vec::new(),
         }
     }
 
@@ -347,6 +371,8 @@ pub(super) struct Assistant {
     model_menu_at: (f32, f32),
     /// Tests: the shell command that stands in for a built-in agent's tool (`codex app-server`).
     pub server_override: Option<String>,
+    /// Undoing a turn's changes (those writes belong to no turn).
+    restoring: bool,
 }
 
 impl Default for Assistant {
@@ -372,6 +398,7 @@ impl Default for Assistant {
             mode_menu_at: (0.0, 0.0),
             model_menu_at: (0.0, 0.0),
             server_override: None,
+            restoring: false,
         }
     }
 }
@@ -1137,7 +1164,14 @@ impl Workbench {
         if matches!(choice, Choice::Builtin(_)) && self.settings.bool("assistant.saveBeforeSending") {
             self.save_for_agent();
         }
-        let prompt = self.assistant_prompt(ci, &text);
+        self.chat_checkpoint(ci);
+        let mut prompt = self.assistant_prompt(ci, &text);
+        let reverted = std::mem::take(&mut self.assistant.chats[ci].reverted);
+        if !reverted.is_empty() {
+            let files: Vec<String> = reverted.iter().map(|p| p.display().to_string()).collect();
+            let note = format!("(From the editor: the user undid changes you made earlier, so these files differ from what you last saw; read them again before editing them: {}.)", files.join(", "));
+            prompt.push(json!({ "type": "text", "text": note }));
+        }
         let chat = &mut self.assistant.chats[ci];
         chat.input.set_text("");
         if chat.title.is_empty() {
@@ -1416,6 +1450,8 @@ impl Workbench {
         } else if Some(id) == chat.prompt_req {
             chat.prompt_req = None;
             chat.phase = Phase::Ready;
+            self.chat_checkpoint(ci);
+            let chat = &mut self.assistant.chats[ci];
             chat.updated = unix_now();
             chat.unread = ci != self.assistant.active;
             // The reply, read out when it's in the chat being shown.
@@ -1456,6 +1492,10 @@ impl Workbench {
     }
 
     fn chat_update(&mut self, ci: usize, u: Update) {
+        // Diffs carry the file as it is before the change: the turn's checkpoint.
+        if let Update::ToolCall(call) | Update::ToolCallUpdate(call) = &u {
+            self.remember_diffs(ci, call.content.iter().flatten());
+        }
         let entries = &mut self.assistant.chats[ci].entries;
         match u {
             Update::AgentText(t) => match entries.last_mut() {
@@ -1529,6 +1569,8 @@ impl Workbench {
                 });
                 let title = call.title.clone().or_else(|| known.as_ref().map(|t| t.title.clone())).unwrap_or_else(|| "The agent wants to continue".into());
                 let content = call.content.clone().or_else(|| known.map(|t| t.content)).unwrap_or_default();
+                self.remember_diffs(ci, content.iter());
+                let chat = &mut self.assistant.chats[ci];
                 let diffs = content.into_iter().filter_map(|c| if let ToolContent::Diff(d) = c { Some(d) } else { None }).collect();
                 let said = format!("{} asks: {title}", chat.agent_name_or_default());
                 chat.entries.push(Entry::Permission(Permission { request: id, title, options: update::permission_options(params), answer: None, diffs }));
@@ -1572,6 +1614,13 @@ impl Workbench {
     /// The agent writes `path`: an open document is edited (one undo step, cursors kept) and
     /// saved unless it had unsaved changes of its own; other files are written to disk.
     pub(super) fn agent_write(&mut self, path: &Path, content: &str) -> Result<(), String> {
+        // Part of the turns running (the editor's tools don't say which chat asks).
+        if !self.assistant.restoring {
+            let before = self.tool_text(path);
+            for chat in self.assistant.chats.iter_mut().filter(|c| c.phase == Phase::Working) {
+                chat.remember(path.to_path_buf(), before.clone());
+            }
+        }
         let open = self.docs.iter().position(|d| d.as_ref().is_some_and(|d| d.buffer.path() == Some(path)));
         let Some(id) = open else {
             if let Some(dir) = path.parent() {
@@ -1596,6 +1645,116 @@ impl Workbench {
             return Err("couldn't save it".into());
         }
         Ok(())
+    }
+
+    /// Keeps the files `content`'s diffs are about, as they were, in chat `ci`'s turn.
+    fn remember_diffs<'a>(&mut self, ci: usize, content: impl Iterator<Item = &'a ToolContent>) {
+        let chat = &mut self.assistant.chats[ci];
+        for c in content {
+            if let ToolContent::Diff(d) = c {
+                chat.remember(PathBuf::from(&d.path), d.old_text.clone());
+            }
+        }
+    }
+
+    /// A file's text as an agent left it: the document's when it has unsaved changes, else the
+    /// disk's (agents that write files themselves are ahead of the document until it reloads).
+    fn current_text(&self, path: &Path) -> Option<String> {
+        match self.docs.iter().flatten().find(|d| d.buffer.path() == Some(path)) {
+            Some(d) if d.buffer.is_dirty() => Some(d.buffer.text()),
+            _ => std::fs::read_to_string(path).ok(),
+        }
+    }
+
+    /// Ends chat `ci`'s turn: the files it changed (those still different from before) become
+    /// an `Entry::Changes`.
+    fn chat_checkpoint(&mut self, ci: usize) {
+        let turn = std::mem::take(&mut self.assistant.chats[ci].turn);
+        let files: Vec<_> = turn.into_iter().filter(|(path, before)| self.current_text(path) != *before).collect();
+        if !files.is_empty() {
+            self.assistant.chats[ci].entries.push(Entry::Changes(Changes { files, undone: false }));
+        }
+    }
+
+    /// Undoes (or redoes) the changes of entry `entry` in chat `ci`: each file gets its other
+    /// version, and keeps the one it had. Returns the files put back.
+    fn swap_changes(&mut self, ci: usize, entry: usize) -> Vec<PathBuf> {
+        let Some(Entry::Changes(changes)) = self.assistant.chats[ci].entries.get(entry).cloned() else { return Vec::new() };
+        self.assistant.restoring = true;
+        let mut files = Vec::new();
+        let mut failed = Vec::new();
+        for (path, other) in changes.files {
+            let now = self.current_text(&path);
+            let done = match &other {
+                Some(text) => self.agent_write(&path, text),
+                None => remove_file(&path),
+            };
+            match done {
+                Ok(()) => files.push((path, now)),
+                Err(e) => {
+                    failed.push(format!("{} ({e})", self.display_path(&path)));
+                    files.push((path, other));
+                }
+            }
+        }
+        self.assistant.restoring = false;
+        let paths = files.iter().map(|(p, _)| p.clone()).collect();
+        let chat = &mut self.assistant.chats[ci];
+        chat.entries[entry] = Entry::Changes(Changes { files, undone: !changes.undone });
+        if !failed.is_empty() {
+            chat.notice(format!("Couldn't put back {}.", failed.join(", ")));
+        }
+        paths
+    }
+
+    /// The shown chat's Undo Changes (or Redo Changes) button on entry `entry`.
+    pub(super) fn assistant_undo(&mut self, entry: usize) {
+        let ci = self.assistant.active;
+        if self.assistant.chats[ci].phase == Phase::Working {
+            return;
+        }
+        let paths = self.swap_changes(ci, entry);
+        let undone = matches!(self.assistant.chats[ci].entries.get(entry), Some(Entry::Changes(c)) if c.undone);
+        self.a11y_say(if undone { "Changes undone" } else { "Changes redone" }.to_string());
+        self.tell_agent_reverted(ci, paths);
+        self.save_chat(ci);
+    }
+
+    /// The shown chat's Revert to Here on message `entry`: undoes every later turn's changes,
+    /// newest first, so the files are as they were before that message.
+    pub(super) fn assistant_revert(&mut self, entry: usize) {
+        let ci = self.assistant.active;
+        if self.assistant.chats[ci].phase == Phase::Working {
+            return;
+        }
+        let later: Vec<usize> = self.assistant.chats[ci].entries.iter().enumerate().skip(entry + 1).filter(|(_, e)| matches!(e, Entry::Changes(c) if !c.undone)).map(|(j, _)| j).collect();
+        let mut paths = Vec::new();
+        for j in later.into_iter().rev() {
+            for p in self.swap_changes(ci, j) {
+                if !paths.contains(&p) {
+                    paths.push(p);
+                }
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+        let n = paths.len();
+        let said = format!("Put back {n} file{} as {} before this message.", if n == 1 { "" } else { "s" }, if n == 1 { "it was" } else { "they were" });
+        self.assistant.chats[ci].notice(said.clone());
+        self.a11y_say(said);
+        self.tell_agent_reverted(ci, paths);
+        self.save_chat(ci);
+    }
+
+    /// The agent hears with the next message that these files changed under it.
+    fn tell_agent_reverted(&mut self, ci: usize, paths: Vec<PathBuf>) {
+        let chat = &mut self.assistant.chats[ci];
+        for p in paths {
+            if !chat.reverted.contains(&p) {
+                chat.reverted.push(p);
+            }
+        }
     }
 
     /// Answers permission request `entry` of the shown chat with its option `option`.
@@ -1988,6 +2147,21 @@ impl Workbench {
             }
             Entry::Auth(_) => wrap(c, "The agent needs you to sign in:", &ui, w - 20.0),
             Entry::Notice(t) => wrap(c, t, &small, w),
+            Entry::Changes(ch) => {
+                let n = ch.files.len();
+                let s = if n == 1 { "" } else { "s" };
+                let head = if ch.undone { format!("Undid the changes to {n} file{s}") } else { format!("Changed {n} file{s}") };
+                let mut lines = wrap(c, &head, &ui.clone().weight(600), w - 20.0);
+                for (path, other) in ch.files.iter().take(5) {
+                    // `other` is the version before when not undone: None = created.
+                    let new = !ch.undone && other.is_none();
+                    lines.push((format!("{}{}", self.display_path(path), if new { " (new)" } else { "" }), small.clone()));
+                }
+                if n > 5 {
+                    lines.push((format!("and {} more", n - 5), small.clone()));
+                }
+                lines
+            }
             Entry::Action(t, _) => t.split('\n').flat_map(|l| wrap(c, l, &ui, w - 20.0)).collect(),
         }
     }
@@ -2017,13 +2191,23 @@ impl Workbench {
         }
         // Lay out every entry, then draw from the bottom up (scrolled by `scroll`).
         let entries = self.assistant.cur().entries.clone();
+        // Checkpoints: buttons while the agent isn't working. A message can be reverted to when
+        // a later turn's changes are still in place.
+        let idle = self.assistant.cur().phase != Phase::Working;
+        let mut revertible = vec![false; entries.len()];
+        let mut later = false;
+        for (i, e) in entries.iter().enumerate().rev() {
+            revertible[i] = idle && later && matches!(e, Entry::User(_));
+            later |= matches!(e, Entry::Changes(c) if !c.undone);
+        }
         let mut blocks = Vec::new();
         let mut total = 8.0;
         for (i, e) in entries.iter().enumerate() {
             let lines = self.entry_lines(c, i, e, w, fg, dim);
             let line_h: f32 = lines.iter().map(|(_, st)| st.line_height.max(16.0)).sum();
             let extra = match e {
-                Entry::User(_) => 16.0,
+                Entry::User(_) => 16.0 + if revertible[i] { 28.0 } else { 0.0 },
+                Entry::Changes(_) => 16.0 + if idle { 30.0 } else { 0.0 },
                 Entry::Tool(t) => 10.0 + if t.content.iter().any(|c| matches!(c, ToolContent::Diff(_))) { 26.0 } else { 0.0 },
                 Entry::Permission(p) => {
                     // Answered: one line instead of the buttons.
@@ -2060,6 +2244,21 @@ impl Workbench {
                     let bubble = Rect::new(x, y0, w, h);
                     c.bordered(bubble, self.color("input.background"), self.color("widget.border"), 1.0, 8.0);
                     draw_lines(c, x + 10.0, y0 + 8.0, &lines);
+                    if revertible[i] {
+                        let b = Rect::new(x + w - 110.0, y0 + h - 30.0, 100.0, 22.0);
+                        self.small_button(c, b, "Revert to Here", Hit::AssistantRevert(i));
+                    }
+                }
+                Entry::Changes(ch) => {
+                    let card = Rect::new(x, y0, w, h);
+                    c.bordered(card, self.color("editorWidget.background"), self.color("widget.border"), 1.0, 8.0);
+                    let icon = if ch.undone { &icons::DISCARD } else { &icons::EDIT };
+                    c.icon(icon, x + 8.0, y0 + 9.0, 14.0, dim);
+                    draw_lines(c, x + 28.0, y0 + 8.0, &lines);
+                    if idle {
+                        let b = Rect::new(x + 28.0, y0 + h - 30.0, 104.0, 22.0);
+                        self.small_button(c, b, if ch.undone { "Redo Changes" } else { "Undo Changes" }, Hit::AssistantUndo(i));
+                    }
                 }
                 Entry::Agent(_) => {
                     // Code lines get the code block background.
@@ -2380,9 +2579,39 @@ mod agent_tests {
         until(&mut wb, &mut r, "the end of the second answer", |wb| wb.assistant.cur().phase == Phase::Ready);
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.status == "failed")));
 
+        // Checkpoints: the first turn's change is kept with the file as it was; the rejected
+        // one changed nothing.
+        let text = |wb: &Workbench| wb.docs.iter().flatten().find(|d| d.buffer.path() == Some(file.as_path())).unwrap().buffer.text();
+        let changes: Vec<usize> = wb.assistant.cur().entries.iter().enumerate().filter(|(_, e)| matches!(e, Entry::Changes(_))).map(|(i, _)| i).collect();
+        assert_eq!(changes.len(), 1);
+        let ch = changes[0];
+        assert!(ch < j);
+        assert_eq!(wb.assistant.cur().entries[ch], Entry::Changes(Changes { files: vec![(file.clone(), Some("hello world\n".into()))], undone: false }));
+        if r.is_some() {
+            draw(&mut wb, &mut r);
+            assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantUndo(ch)));
+            wb.assistant.cur_mut().scroll = f32::MAX;
+            draw(&mut wb, &mut r);
+            assert!(wb.hits.iter().any(|(_, h)| *h == Hit::AssistantRevert(0)));
+            assert!(!wb.hits.iter().any(|(_, h)| matches!(h, Hit::AssistantRevert(k) if *k > ch)));
+        }
+        // Undo puts the file back (saved, as it was clean), Redo makes the change again.
+        wb.assistant_undo(ch);
+        assert_eq!((text(&wb), std::fs::read_to_string(&file).unwrap()), ("hello world\n".into(), "hello world\n".into()));
+        assert_eq!(wb.assistant.cur().entries[ch], Entry::Changes(Changes { files: vec![(file.clone(), Some("goodbye world\n".into()))], undone: true }));
+        wb.assistant_undo(ch);
+        assert_eq!(text(&wb), "goodbye world\n");
+        // Revert to Here on the first message: as before it.
+        wb.assistant_revert(0);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "hello world\n");
+        assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Notice(n)) if n == "Put back 1 file as it was before this message."));
+        assert_eq!(wb.assistant.cur().reverted, vec![file.clone()]);
+
         // Stopping while it asks answers the question "cancelled".
         type_and_send(&mut wb, "once more");
         until(&mut wb, &mut r, "the third question", |wb| wb.assistant.cur().entries.iter().filter(|e| matches!(e, Entry::Permission(_))).count() == 3);
+        // The agent heard about the reverted file with this message.
+        assert!(wb.assistant.cur().reverted.is_empty());
         wb.assistant_cancel();
         until(&mut wb, &mut r, "the stop", |wb| wb.assistant.cur().phase == Phase::Ready);
         assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Notice(n)) if n == "Stopped."));
@@ -2593,7 +2822,10 @@ mod agent_tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world!\n");
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Run `ls -1`" && t.status == "completed")));
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")));
-        assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Agent(t)) if t == "Done."), "{:#?}", wb.assistant.cur().entries.last());
+        // The reply, then the checkpoint of the files it changed.
+        let e = &wb.assistant.cur().entries;
+        assert!(matches!(&e[e.len() - 2], Entry::Agent(t) if t == "Done."), "{:#?}", &e[e.len() - 2]);
+        assert!(matches!(e.last(), Some(Entry::Changes(c)) if c.files == vec![(file.clone(), Some("hello world!\n".to_string()))]), "{:#?}", e.last());
         // The editor tools went to Codex's config.
         assert!(wb.output.lines("Assistant").iter().any(|l| l == "mcp servers: ['orbvane']"), "{:?}", wb.output.lines("Assistant"));
 
@@ -2666,7 +2898,10 @@ mod agent_tests {
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "goodbye world\n");
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Edit notes.txt" && t.status == "completed")));
         assert!(wb.assistant.cur().entries.iter().any(|e| matches!(e, Entry::Tool(t) if t.title == "Run `ls -1`" && t.status == "completed")));
-        assert!(matches!(wb.assistant.cur().entries.last(), Some(Entry::Agent(t)) if t == "Done."), "{:#?}", wb.assistant.cur().entries.last());
+        // The reply, then the checkpoint of the files it changed.
+        let e = &wb.assistant.cur().entries;
+        assert!(matches!(&e[e.len() - 2], Entry::Agent(t) if t == "Done."), "{:#?}", &e[e.len() - 2]);
+        assert!(matches!(e.last(), Some(Entry::Changes(c)) if c.files == vec![(file.clone(), Some("hello world\n".to_string()))]), "{:#?}", e.last());
         let log = wb.output.lines("Assistant");
         assert!(log.iter().any(|l| l == "flags ok") && log.iter().any(|l| l == "mcp servers: ['orbvane']"), "{log:?}");
         // New chats start in the default mode (here Accept Edits).
@@ -2888,7 +3123,7 @@ fn entry_read(e: &Entry, lines: &[(String, TextStyle)], agent: &str) -> String {
             Some(answer) => format!("{agent} asked: {}. Answered: {answer}", p.title),
             None => format!("{agent} asks: {}", p.title),
         },
-        Entry::Auth(_) | Entry::Notice(_) | Entry::Action(..) => text,
+        Entry::Auth(_) | Entry::Notice(_) | Entry::Action(..) | Entry::Changes(_) => text,
     }
 }
 
@@ -2899,4 +3134,15 @@ fn plain_text(md: &str) -> String {
         .map(|l| l.trim_start_matches(['#', '>', ' ']).replace(['*', '`'], ""))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Removes a file a turn created (to the Trash: it may hold work since).
+fn remove_file(path: &Path) -> Result<(), String> {
+    if !path.exists() {
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    return crate::trash::move_to_trash(path);
+    #[cfg(test)]
+    std::fs::remove_file(path).map_err(|e| e.to_string())
 }

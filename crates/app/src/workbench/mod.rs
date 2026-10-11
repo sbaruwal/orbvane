@@ -383,6 +383,9 @@ enum Hit {
     AssistantCustomAgent,
     AssistantBody,
     AssistantReview(usize, usize),
+    /// A turn's Undo Changes (Redo Changes) button, and a message's Revert to Here.
+    AssistantUndo(usize),
+    AssistantRevert(usize),
     AssistantOption(usize, usize),
     AssistantAuth(usize, usize),
     AssistantAction(usize, usize),
@@ -2434,6 +2437,8 @@ impl Workbench {
             Hit::AssistantAgentMenu => self.assistant_agent_menu(),
             Hit::AssistantBody => {}
             Hit::AssistantReview(e, d) => self.assistant_review(e, d),
+            Hit::AssistantUndo(e) => self.assistant_undo(e),
+            Hit::AssistantRevert(e) => self.assistant_revert(e),
             Hit::AssistantOption(e, o) => self.assistant_answer(e, o),
             Hit::AssistantAuth(e, m) => {
                 if let Some(assistant::Entry::Auth(methods)) = self.assistant.cur().entries.get(e) {
@@ -2741,7 +2746,7 @@ impl Workbench {
             Some(Hit::OutlineRow(_) | Hit::OutlineTwistie(_) | Hit::OutlineBody) => self.outline_scroll(dy),
             Some(Hit::DebugBody(i) | Hit::DebugRow(i, _) | Hit::DebugRowAction(i, _, _)) => self.debug_scroll(i, dy),
             Some(Hit::DebugConsoleBody) => self.debug_console_scroll(dy),
-            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantOption(..) | Hit::AssistantAuth(..) | Hit::AssistantAction(..) | Hit::AssistantHistoryRow(_) | Hit::AssistantHistoryDelete(_)) => self.assistant_scroll(dy),
+            Some(Hit::AssistantBody | Hit::AssistantReview(..) | Hit::AssistantUndo(_) | Hit::AssistantRevert(_) | Hit::AssistantOption(..) | Hit::AssistantAuth(..) | Hit::AssistantAction(..) | Hit::AssistantHistoryRow(_) | Hit::AssistantHistoryDelete(_)) => self.assistant_scroll(dy),
             Some(Hit::PeekRow(_) | Hit::PeekBody | Hit::PeekTwistie(_)) => self.peek_scroll(dy),
             Some(Hit::Image(g)) => {
                 let gr = &mut self.groups[g];
