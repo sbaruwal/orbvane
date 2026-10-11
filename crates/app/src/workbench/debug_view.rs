@@ -572,6 +572,7 @@ impl Workbench {
         let mono = |color: Color| TextStyle::mono(12.0, lh, color);
         // Rows: console lines split at their line breaks.
         let rows: Vec<(&str, &str)> = self.debug.console.iter().flat_map(|l| l.text.trim_end_matches('\n').split('\n').map(move |t| (t, l.category.as_str()))).collect();
+        self.a11y_out.console(&rows);
         let total = rows.len() as f32 * lh;
         let max = (total - lines_rect.h + 8.0).max(0.0);
         // Scroll is measured up from the bottom, so new output stays in view.
@@ -580,8 +581,15 @@ impl Workbench {
         c.push_clip(lines_rect);
         let first = (top / lh) as usize;
         let n = (lines_rect.h / lh).ceil() as usize + 1;
+        let mut items = Vec::new();
         for (i, (text, category)) in rows.iter().enumerate().skip(first).take(n) {
             let y = lines_rect.y + 4.0 + i as f32 * lh - top;
+            let read = match *category {
+                "input" => format!("Input: {text}"),
+                "result" => format!("Result: {text}"),
+                _ => text.to_string(),
+            };
+            items.push((i, read, Rect::new(lines_rect.x, y, lines_rect.w, lh).intersect(&lines_rect)));
             let color = match *category {
                 "stderr" => self.color("debugConsole.errorForeground"),
                 "console" | "important" => self.color("debugConsole.infoForeground"),
@@ -597,6 +605,10 @@ impl Workbench {
             c.text(x, y, text, &mono(color));
         }
         c.pop_clip();
+        self.a11y_list(super::a11y::CONSOLE_LIST, Some(super::a11y::PANEL), "Debug Console", lines_rect);
+        for (i, read, rect) in items {
+            self.a11y_item(super::a11y::CONSOLE_LIST, i, read, rect, false);
+        }
         // The input, with the prompt chevron.
         let focused = self.focus == Focus::DebugConsole && self.palette.is_none();
         c.fill(Rect::new(input_rect.x, input_rect.y, input_rect.w, 1.0), self.color("panel.border"));

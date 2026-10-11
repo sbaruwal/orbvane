@@ -533,6 +533,7 @@ impl Workbench {
             }
         }
         let Some(term) = &inst.term else { return };
+        let title = inst.title().to_string();
         if inst.title_checked.is_none_or(|t| t.elapsed() >= TITLE_POLL) {
             inst.title_checked = Some(Instant::now());
             // Until the child execs the shell, it still has our name.
@@ -552,6 +553,8 @@ impl Workbench {
 
         c.push_clip(body);
         let mut spans: Vec<(usize, usize, Color)> = Vec::new();
+        // The rows as text, for assistive technology.
+        let mut screen = Vec::with_capacity(rows);
         for r in 0..rows {
             let Some(row) = t.visible_row(r, inst.scroll) else { break };
             let y = origin.1 + r as f32 * line_h();
@@ -607,6 +610,7 @@ impl Workbench {
                 last.1 = last.1.min(trimmed);
             }
             c.rich_text(origin.0, y, &text[..trimmed], &spans, &style);
+            screen.push(text[..trimmed].to_string());
         }
 
         // Cursor (only when viewing the live screen).
@@ -651,6 +655,15 @@ impl Workbench {
             c.fill(Rect::new(track.x, top, track.w, h), colors.scrollbar);
         }
         c.pop_clip();
+        // The live screen's new output is read out (not a full-screen program's redraws).
+        let live = inst.scroll == 0 && !exited;
+        let cursor = (live && cy < rows).then_some((cx, cy));
+        if focused && live && !t.is_alt_screen() {
+            self.a11y_out.term_now = Some(((g, p), screen.clone(), cursor.map(|c| c.1)));
+        }
+        drop(emu);
+        let frame = Rect::new(origin.0, origin.1, cols as f32 * cw, screen.len() as f32 * line_h());
+        self.a11y_terminal(p, &title, frame, &screen, cursor, focused);
     }
 
     /// The terminal list: one row per terminal, split groups drawn as a tree.
@@ -820,6 +833,7 @@ pub(super) fn encode_key(k: &KeyInput, app_cursor: bool) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::workbench::a11y;
 
     fn key(key: Key, text: Option<&str>) -> KeyInput {
         KeyInput { key, text: text.map(String::from), cmd: false, shift: false, alt: false, ctrl: false }
@@ -836,6 +850,49 @@ mod tests {
         let shift_right = KeyInput { shift: true, ..key(Key::Right, None) };
         assert_eq!(encode_key(&shift_right, false).unwrap(), b"\x1b[1;2C");
         assert_eq!(encode_key(&key(Key::F(5), None), false).unwrap(), b"\x1b[15~");
+    }
+
+    /// VoiceOver sees the focused terminal as text with the cursor as its caret, and new output
+    /// is read out once it settles.
+    #[test]
+    fn the_terminal_is_read_out() {
+        let dir = std::env::temp_dir().join(format!("orbvane-term-a11y-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // SAFETY: every test that reads this wants the same scratch user data folder.
+        unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+        let mut wb = Workbench::new(Some(dir.clone()), &[], std::sync::Arc::new(|| {}));
+        let Ok(mut r) = render::Renderer::offscreen((1100, 700), 1.0) else { return }; // no GPU here
+        let mut draw = |wb: &mut Workbench| {
+            let bg = wb.background();
+            r.frame(bg, |c| wb.draw(c));
+        };
+        let until = |wb: &mut Workbench, draw: &mut dyn FnMut(&mut Workbench), what: &str, done: &dyn Fn(&Workbench) -> bool| {
+            let start = Instant::now();
+            while !done(wb) {
+                assert!(start.elapsed() < Duration::from_secs(15), "timed out waiting for {what}");
+                std::thread::sleep(Duration::from_millis(50));
+                draw(wb);
+            }
+        };
+        wb.show_terminal();
+        let id = a11y::TERMINAL;
+        until(&mut wb, &mut draw, "the prompt", &|wb| wb.a11y_value(id).trim().len() > 0);
+        let node = wb.a11y_node(id).unwrap();
+        assert_eq!((node.role, node.parent), (a11y::Role::TextArea, Some(a11y::PANEL)));
+        assert!(node.label.starts_with("Terminal, "), "{}", node.label);
+        assert_eq!(wb.a11y_focused(), Some(id));
+        let (start, len) = wb.a11y_line_range(id, 0);
+        assert_eq!((start, wb.a11y_string(id, start, len).trim_end()), (0, wb.a11y_value(id).lines().next().unwrap().trim_end()));
+
+        let note = wb.a11y_note().to_string();
+        wb.terms.groups[0].panes[0].term.as_ref().unwrap().write(b"echo orbvane-$((40 + 2))\r");
+        until(&mut wb, &mut draw, "the output read out", &|wb| wb.a11y_note() != note && wb.a11y_note().contains("orbvane-42"));
+        // The caret follows the cursor, on the new prompt's row.
+        let caret = wb.a11y_selection(id).0;
+        assert!(wb.a11y_line_of(id, caret) > 0);
+        wb.shutdown();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

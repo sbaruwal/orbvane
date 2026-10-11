@@ -551,6 +551,8 @@ pub struct Workbench {
     a11y_presses: Vec<(u64, Hit)>,
     /// What to say next without moving focus, numbered (`a11y_say`).
     a11y_note: (u64, String),
+    /// New terminal and Debug Console output waiting to be read out.
+    a11y_out: a11y::Output,
     ime_area: Option<Rect>,
     mouse: (f32, f32),
     drag: Option<Drag>,
@@ -718,6 +720,7 @@ impl Workbench {
             a11y_names: Vec::new(),
             a11y_presses: Vec::new(),
             a11y_note: (0, String::new()),
+            a11y_out: a11y::Output::default(),
             ime_area: None,
             mouse: (0.0, 0.0),
             drag: None,
@@ -883,7 +886,7 @@ impl Workbench {
             self.caret_epoch + CARET_BLINK * n as u32
         });
         let status = self.status_message.as_ref().filter(|_| self.chord.is_none()).map(|(_, t)| *t + Duration::from_secs(3));
-        [blink, self.hover_deadline(), self.search_deadline(), self.scm_deadline(), self.auto_save_deadline(), status, self.git_deadline(), self.terminal_deadline(), self.format_save_deadline(), self.lightbulb_deadline(), self.outline_deadline(), self.symbol_search_deadline(), self.inlay_deadline(), self.semantic_deadline(), self.folding_deadline(), self.watch_deadline(), self.debug_deadline(), self.lens_deadline(), self.testing_deadline(), self.search_editor_deadline(), self.linked_deadline(), self.color_deadline(), self.toasts_deadline(), self.marketplace_deadline(), self.updates_deadline(), self.idle_servers_deadline(), self.assistant_deadline(), self.mcp_deadline()]
+        [blink, self.hover_deadline(), self.search_deadline(), self.scm_deadline(), self.auto_save_deadline(), status, self.git_deadline(), self.terminal_deadline(), self.format_save_deadline(), self.lightbulb_deadline(), self.outline_deadline(), self.symbol_search_deadline(), self.inlay_deadline(), self.semantic_deadline(), self.folding_deadline(), self.watch_deadline(), self.debug_deadline(), self.lens_deadline(), self.testing_deadline(), self.search_editor_deadline(), self.linked_deadline(), self.color_deadline(), self.toasts_deadline(), self.marketplace_deadline(), self.updates_deadline(), self.idle_servers_deadline(), self.assistant_deadline(), self.mcp_deadline(), self.a11y_out.deadline()]
             .into_iter()
             .flatten()
             .min()
@@ -2925,6 +2928,7 @@ impl Workbench {
             self.draw_palette(c, full);
         }
         self.draw_preedit(c);
+        self.a11y_output();
         self.a11y_finish();
 
         let title = self.window_title();

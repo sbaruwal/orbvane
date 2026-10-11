@@ -4,7 +4,11 @@
 //! the text fields drawn (`widgets::take_drawn_fields`) and a node for every control in `hits`
 //! that has a name (`a11y_name` while drawing, else `control`). `crate::a11y` turns them into the
 //! platform's accessibility elements and asks the questions below when VoiceOver does.
-//! Offsets and lengths are UTF-16 code units, lines are buffer lines.
+//! Offsets and lengths are UTF-16 code units, lines are buffer lines (a terminal's: its screen
+//! rows). New output in the focused terminal and the Debug Console is read out once it settles
+//! (`Output`).
+
+use std::time::{Duration, Instant};
 
 use render::Rect;
 use text::{Pos, Selection};
@@ -32,6 +36,10 @@ pub const SEARCH_LIST: u64 = 14;
 pub const DEBUG_LIST: u64 = 20;
 /// The Assistant's conversation (its entries).
 pub const TRANSCRIPT_LIST: u64 = 30;
+/// A terminal pane's screen (read-only text, the cursor as its caret): `TERMINAL + pane`.
+pub const TERMINAL: u64 = 40;
+/// The Debug Console's lines.
+pub const CONSOLE_LIST: u64 = 60;
 /// An editor group's text area: `TEXT_AREA + group`.
 pub const TEXT_AREA: u64 = 100;
 /// The text fields drawn, in drawing order: `FIELD + index`.
@@ -111,6 +119,104 @@ pub struct State {
     pub note: u64,
 }
 
+/// How long output must stop arriving before it's read out.
+const SETTLE: Duration = Duration::from_millis(500);
+/// At most this many lines are read out at once.
+const MAX_SAID: usize = 30;
+
+/// New output to read out: the focused terminal's screen compared with what was said of it,
+/// and the Debug Console's new lines.
+#[derive(Default)]
+pub(super) struct Output {
+    /// The focused terminal drawn this frame: its (group, pane), screen rows and cursor row.
+    pub term_now: Option<((usize, usize), Vec<String>, Option<usize>)>,
+    term_key: Option<(usize, usize)>,
+    term_said: Vec<String>,
+    term_last: Vec<String>,
+    term_at: Option<Instant>,
+    /// Whether the Debug Console was drawn this frame, its rows then, and new lines waiting.
+    console_drawn: bool,
+    console_seen: Option<usize>,
+    console_new: Vec<String>,
+    console_at: Option<Instant>,
+}
+
+impl Output {
+    /// The Debug Console drawn with `rows` (text, category): new ones wait to be read (not the
+    /// user's own input). The first frame it shows says nothing of what was there.
+    pub fn console(&mut self, rows: &[(&str, &str)]) {
+        self.console_drawn = true;
+        if let Some(seen) = self.console_seen.filter(|&s| rows.len() > s) {
+            self.console_new.extend(rows[seen..].iter().filter(|r| r.1 != "input" && !r.0.trim().is_empty()).map(|r| r.0.to_string()));
+            self.console_at = Some(Instant::now());
+        }
+        self.console_seen = Some(rows.len());
+    }
+
+    /// The end of a frame: what to read out now.
+    fn finish(&mut self) -> Option<String> {
+        let mut say = Vec::new();
+        match self.term_now.take() {
+            None => self.term_key = None,
+            Some((key, screen, cursor)) => {
+                if self.term_key != Some(key) {
+                    // Newly focused: what's there now isn't news.
+                    self.term_key = Some(key);
+                    self.term_said = screen.clone();
+                    self.term_last = screen;
+                    self.term_at = None;
+                } else {
+                    if screen != self.term_last {
+                        self.term_last = screen.clone();
+                        self.term_at = Some(Instant::now());
+                    }
+                    if self.term_at.is_some_and(|t| t.elapsed() >= SETTLE) {
+                        self.term_at = None;
+                        say.extend(new_lines(&self.term_said, &screen, cursor));
+                        self.term_said = screen;
+                    }
+                }
+            }
+        }
+        if !std::mem::take(&mut self.console_drawn) {
+            self.console_seen = None;
+            self.console_new.clear();
+            self.console_at = None;
+        } else if self.console_at.is_some_and(|t| t.elapsed() >= SETTLE) {
+            self.console_at = None;
+            say.append(&mut self.console_new);
+        }
+        if say.is_empty() {
+            return None;
+        }
+        let more = say.len().saturating_sub(MAX_SAID);
+        say.truncate(MAX_SAID);
+        if more > 0 {
+            say.push(format!("and {more} more lines"));
+        }
+        Some(say.join("\n"))
+    }
+
+    /// When output waiting to be read will have settled.
+    pub fn deadline(&self) -> Option<Instant> {
+        [self.term_at, self.console_at].into_iter().flatten().min().map(|t| t + SETTLE)
+    }
+}
+
+/// The rows of `now` that weren't on the screen `before` (which may have scrolled up by any
+/// number of rows), without the cursor's row: that's being typed.
+fn new_lines(before: &[String], now: &[String], cursor: Option<usize>) -> Vec<String> {
+    (0..=before.len())
+        .map(|shift| {
+            (0..now.len())
+                .filter(|&i| Some(i) != cursor && !now[i].trim().is_empty() && before.get(i + shift) != Some(&now[i]))
+                .map(|i| now[i].trim_end().to_string())
+                .collect::<Vec<_>>()
+        })
+        .min_by_key(|lines| lines.len())
+        .unwrap_or_default()
+}
+
 /// How a file's git status is said.
 pub fn status_word(s: scm::FileStatus) -> &'static str {
     use scm::FileStatus::*;
@@ -133,6 +239,24 @@ impl Workbench {
     }
 
     /// Group `g`'s editor text (`frame` is where the text is drawn).
+    /// Terminal pane `p`'s screen: its rows as text, the cursor's (row, col) as the caret.
+    pub(super) fn a11y_terminal(&mut self, p: usize, title: &str, frame: Rect, rows: &[String], cursor: Option<(usize, usize)>, focused: bool) {
+        let mut caret = 0;
+        if let Some((col, row)) = cursor {
+            caret = rows.iter().take(row).map(|r| r.encode_utf16().count() + 1).sum::<usize>();
+            caret += rows.get(row).map_or(0, |r| r.chars().take(col).map(char::len_utf16).sum());
+        }
+        let node = Node::new(TERMINAL + p as u64, Some(PANEL), Role::TextArea, format!("Terminal, {title}"), frame);
+        self.a11y.push(Node { value: Some(rows.join("\n")), selection: (caret, 0), focused, ..node });
+    }
+
+    /// The end of a frame's output: new terminal and Debug Console lines are read out.
+    pub(super) fn a11y_output(&mut self) {
+        if let Some(text) = self.a11y_out.finish() {
+            self.a11y_say(text);
+        }
+    }
+
     pub(super) fn a11y_text_area(&mut self, g: usize, frame: Rect) {
         let Some((_, doc)) = self.a11y_editor_of(g) else { return };
         let label = doc.title();
@@ -349,7 +473,7 @@ impl Workbench {
             return shown(item(PALETTE_LIST, p.selected)).or_else(|| shown(PALETTE_LIST));
         }
         // A text field (find, search, commit message, the Assistant's box, settings' search).
-        if let Some(n) = self.a11y.iter().find(|n| n.role == Role::TextField && n.focused) {
+        if let Some(n) = self.a11y.iter().find(|n| matches!(n.role, Role::TextField | Role::TextArea) && n.focused) {
             return Some(n.id);
         }
         if self.settings_active() {
@@ -387,9 +511,14 @@ impl Workbench {
         })
     }
 
-    /// A text field's node.
+    /// A text field's node, or a text area that holds its text (a terminal's).
     fn a11y_field(&self, id: u64) -> Option<&Node> {
-        self.a11y_node(id).filter(|n| n.role == Role::TextField)
+        self.a11y_node(id).filter(|n| n.role == Role::TextField || (n.role == Role::TextArea && n.value.is_some()))
+    }
+
+    /// The text of a text area that holds it.
+    fn a11y_held_text(&self, id: u64) -> Option<&str> {
+        self.a11y_node(id).filter(|n| n.role == Role::TextArea).and_then(|n| n.value.as_deref())
     }
 
     /// Whether assistive technology can press `id` (or focus it, for a text field not being
@@ -439,11 +568,25 @@ impl Workbench {
 
     /// The line `offset` is on.
     pub fn a11y_line_of(&self, id: u64, offset: usize) -> usize {
+        if let Some(text) = self.a11y_held_text(id) {
+            return text.encode_utf16().take(offset).filter(|&u| u == '\n' as u16).count();
+        }
         self.a11y_editor(id).map_or(0, |(_, d)| d.buffer.pos_of_utf16(offset).line)
     }
 
     /// Line `line`: (start, length), its line break included.
     pub fn a11y_line_range(&self, id: u64, line: usize) -> (usize, usize) {
+        if let Some(text) = self.a11y_held_text(id) {
+            let mut start = 0;
+            for (i, l) in text.split('\n').enumerate() {
+                let len = l.encode_utf16().count();
+                if i == line {
+                    return (start, len + usize::from(start + len < self.a11y_length(id)));
+                }
+                start += len + 1;
+            }
+            return (self.a11y_length(id), 0);
+        }
         if self.a11y_field(id).is_some() {
             return (0, self.a11y_length(id));
         }
@@ -468,6 +611,12 @@ impl Workbench {
     /// Where a range is drawn (window coordinates): its first row, from its start to its end
     /// (or the text's right edge when it continues on later rows).
     pub fn a11y_range_frame(&self, id: u64, start: usize, len: usize) -> Rect {
+        if let (Some(text), Some(n)) = (self.a11y_held_text(id), self.a11y_node(id)) {
+            // Rows of equal height: the range's first row.
+            let row_h = n.frame.h / text.split('\n').count().max(1) as f32;
+            let _ = len;
+            return Rect::new(n.frame.x, n.frame.y + self.a11y_line_of(id, start) as f32 * row_h, n.frame.w, row_h);
+        }
         if let Some(f) = self.a11y_field(id) {
             return f.frame;
         }
@@ -544,4 +693,43 @@ fn words(debug: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lines(s: &[&str]) -> Vec<String> {
+        s.iter().map(|l| l.to_string()).collect()
+    }
+
+    #[test]
+    fn new_output_is_what_scrolled_in() {
+        let before = lines(&["~ % ls", "a.txt", "~ % echo hi", ""]);
+        // The screen scrolled up by two: "hi" and a new prompt (the cursor's row) came in.
+        let now = lines(&["a.txt", "~ % echo hi", "hi", "~ % "]);
+        assert_eq!(new_lines(&before, &now, Some(3)), vec!["hi"]);
+        // Typing on the prompt's row says nothing.
+        let typed = lines(&["~ % ls", "a.txt", "~ % echo hi", "~ % ec"]);
+        assert!(new_lines(&before, &typed, Some(3)).is_empty());
+        // More than a screen of output: all of it.
+        assert_eq!(new_lines(&before, &lines(&["1", "2", "3", "~ %"]), Some(3)), vec!["1", "2", "3"]);
+    }
+
+    #[test]
+    fn console_lines_are_read_once_settled() {
+        let mut out = Output::default();
+        out.console(&[("earlier", "stdout")]);
+        assert_eq!(out.finish(), None);
+        out.console(&[("earlier", "stdout"), ("1 + 1", "input"), ("2", "result"), ("oops", "stderr")]);
+        assert_eq!(out.finish(), None);
+        assert!(out.deadline().is_some());
+        std::thread::sleep(SETTLE);
+        out.console(&[("earlier", "stdout"), ("1 + 1", "input"), ("2", "result"), ("oops", "stderr")]);
+        assert_eq!(out.finish().as_deref(), Some("2\noops"));
+        // Not shown for a frame: what came meanwhile isn't news when it shows again.
+        assert_eq!(out.finish(), None);
+        out.console(&[("earlier", "stdout"), ("later", "stdout")]);
+        assert_eq!((out.finish(), out.deadline()), (None, None));
+    }
 }
