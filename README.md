@@ -205,7 +205,7 @@ Built-in grammars: `rust`, `python`, `go`, `c`, `cpp`, `javascript`, `typescript
 </details>
 
 <details>
-<summary><b>Debugging</b>: native, Python, Go and Node.js</summary>
+<summary><b>Debugging</b>: native, Python, Go, Node.js, C#, Ruby and Dart</summary>
 
 <br>
 
@@ -218,6 +218,20 @@ to create one.
 | `debugpy` | Python | `debugpy`, with the workspace's `.venv` |
 | `go` | Go | Delve (`dlv dap`), launch or attach |
 | `node` | Node.js, TypeScript | our own adapter, with source maps; child processes and workers are debugged too (`autoAttachChildProcesses`) |
+| `coreclr` | C# (.NET) | `netcoredbg` |
+| `rdbg` | Ruby | `rdbg` (`gem install debug`) |
+| `dart` | Dart | `dart debug_adapter` (the Dart SDK) |
+
+Any other debug adapter can be added in settings, without an extension: `debug.adapters` describes
+how to start it (its command and arguments, over stdin/stdout or a port), the files it debugs and
+the configuration a new `launch.json` gets. An entry with the `"type"` of a built-in one replaces it.
+
+```jsonc
+"debug.adapters": [
+  { "type": "zig", "label": "Zig", "command": "zig-dap", "files": ["*.zig"],
+    "configurations": [{ "type": "zig", "request": "launch", "name": "Zig: Run", "program": "${workspaceFolder}/zig-out/bin/app" }] }
+]
+```
 
 While stopped you get Variables, Watch, Call Stack, Breakpoints, a floating toolbar, values on
 hover, and the Debug Console. Breakpoints can have conditions, hit counts and log messages, and
@@ -310,6 +324,10 @@ In a chat:
   editor's (`assistant.editorFiles`). Codex reads and writes files on disk, so files with unsaved
   changes are saved before each message (`assistant.saveBeforeSending`), and open files reload
   when it changes them.
+- **Checkpoints:** when a reply changed files, a card lists them with **Undo Changes** (then
+  **Redo Changes**). **Revert to Here** on one of your messages puts every file back as it was
+  before that message. Open files change as one undo step. The agent is told which files went
+  back with your next message.
 
 </details>
 
@@ -332,7 +350,8 @@ The Extensions view (⇧⌘X) installs from:
 - **[Orbvane's registry](https://github.com/sbaruwal/orbvane-extensions):** extensions built from
   source by the registry's CI for both Mac architectures.
 - **[Open VSX](https://open-vsx.org):** their contributions (themes, snippets, languages...) work.
-  Their JavaScript code doesn't run.
+  Their JavaScript code doesn't run. Each result has a badge saying how much of it works in
+  Orbvane (**Works**, **Partly**, **Won't work**), and its page lists what's used and what isn't.
 
 Downloads are checked against the registry's SHA-256 and, for Open VSX, against the signature it
 publishes with each package (Ed25519); a package that fails is not installed. Updates are installed automatically
@@ -378,13 +397,14 @@ file. Search, Go to File, language servers, tests and source control cover every
   - **Lists you move through:** the Explorer and the palette (Go to File, commands, every picker)
     read each row as you arrow through ("src, folder, expanded", "main.rs, modified").
   - **Lists you browse:** Problems, Source Control's changes, Search's results, Run and Debug's
-    sections and the Assistant's conversation.
+    sections, the Debug Console and the Assistant's conversation.
   - **Controls:** buttons, tabs (the shown one selected), toggles with their state and text
     fields, in the toolbar, the views, the panel, the status bar and the find widget. Each can be
     pressed from VoiceOver.
   - **Settings:** each setting with its value, and its description as help.
-  - **Said as it happens:** the selected suggestion while you type, and an agent's reply or
-    question in the Assistant.
+  - **The terminal:** its screen as text, line by line, with the cursor as the caret.
+  - **Said as it happens:** the selected suggestion while you type, an agent's reply or
+    question in the Assistant, and new output in the terminal and the Debug Console.
 - **Input methods:** Chinese, Japanese and Korean input with the candidate window at the caret,
   in the editor, the palette, text fields and the terminal; wide characters take two columns.
 
@@ -534,7 +554,8 @@ Every setting is listed with its description in the Settings sheet.
 - **Language features come from language servers.** Orbvane offers to install a missing one, but
   some languages have only highlighting until you do.
 - **Debugging:** native debugging uses `lldb-dap` from the Command Line Tools.
-- **Accessibility:** VoiceOver doesn't read the terminal's output or the Debug Console yet.
+- **Accessibility:** VoiceOver doesn't read full-screen terminal programs (editors, `top`) as
+  they redraw.
 - **Assistant:** Codex (and Claude Code with `assistant.editorFiles` off) reads files from disk, so
   Orbvane saves your unsaved changes before each message (`assistant.saveBeforeSending`).
 
