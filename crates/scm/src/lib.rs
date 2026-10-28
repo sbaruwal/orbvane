@@ -12,7 +12,7 @@ use std::sync::Arc;
 use std::thread;
 
 pub use diff::{apply_changes, hunks, line_changes, side_by_side, DiffRow, LineChange};
-pub use git::{available as git_available, clone, clone_dir_name, commit_refs, git_dir, repo_root, show, Change, LogEntry, FileStatus, Ref, RefKind, Remote, Stash, Status};
+pub use git::{available as git_available, Blame, BlameCommit, clone, clone_dir_name, commit_refs, git_dir, repo_root, show, Change, LogEntry, FileStatus, Ref, RefKind, Remote, Stash, Status};
 
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
 
@@ -105,6 +105,9 @@ pub enum Job {
     Graph,
     /// Load the files a commit changed.
     CommitFiles(String),
+    /// Blame a file: its lines as `contents` when given (the editor's). `tag` comes back with
+    /// the answer (the document's version).
+    Blame { path: PathBuf, contents: Option<String>, tag: u64 },
 }
 
 pub enum Event {
@@ -120,6 +123,8 @@ pub enum Event {
     Graph(Vec<graph::GraphCommit>),
     /// A commit's changed files: (status letter, path).
     CommitFiles(String, Vec<(char, PathBuf)>),
+    /// None: git can't blame it (untracked, no commits).
+    Blame { path: PathBuf, tag: u64, blame: Option<Blame> },
 }
 
 /// Runs one operation. `initial`: the repository has no commits yet.
@@ -277,6 +282,11 @@ impl Repo {
                                 let _ = events.send(Event::Graph(git::graph_log(&root, 300)));
                                 continue;
                             }
+                            Job::Blame { path, contents, tag } => {
+                                let blame = git::blame(&root, &path, contents.as_deref());
+                                let _ = events.send(Event::Blame { path, tag, blame });
+                                continue;
+                            }
                             Job::CommitFiles(hash) => {
                                 let files = git::commit_files(&root, &hash);
                                 let _ = events.send(Event::CommitFiles(hash, files));
@@ -397,6 +407,34 @@ mod tests {
         git::stage_contents(&dir, &file, &staged).unwrap();
         assert_eq!(show(&dir, "", &file).unwrap(), "ONE\ntwo\nthree\n");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), working);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn blames_lines_with_the_editors_text() {
+        let dir = temp_dir("blame");
+        init(&dir);
+        let file = dir.join("a.txt");
+        std::fs::write(&file, "one\ntwo\n").unwrap();
+        run(&dir, &["add", "a.txt"]);
+        run(&dir, &["commit", "-q", "-m", "First lines"]);
+        std::fs::write(&file, "one\ntwo\nthree\n").unwrap();
+        run(&dir, &["commit", "-q", "-am", "A third line"]);
+        let b = git::blame(&dir, &file, None).unwrap();
+        assert_eq!(b.lines.len(), 3);
+        let summary = |b: &Blame, line: usize| b.commits[b.lines[line]].summary.clone();
+        assert_eq!((summary(&b, 0), summary(&b, 2)), ("First lines".into(), "A third line".into()));
+        let first = &b.commits[b.lines[0]];
+        assert_eq!((first.author.as_str(), first.email.as_str(), first.uncommitted()), ("Test", "test@example.com", false));
+        assert!(first.time > 1_600_000_000);
+        // Unsaved text: a new first line, not committed, and the rest moved down.
+        let b = git::blame(&dir, &file, Some("zero\none\ntwo\nthree\n")).unwrap();
+        assert_eq!(b.lines.len(), 4);
+        assert!(b.commits[b.lines[0]].uncommitted());
+        assert_eq!(summary(&b, 3), "A third line");
+        // Untracked: nothing.
+        std::fs::write(dir.join("new.txt"), "x\n").unwrap();
+        assert!(git::blame(&dir, &dir.join("new.txt"), None).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

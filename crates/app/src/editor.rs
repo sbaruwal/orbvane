@@ -265,6 +265,8 @@ pub struct Decorations<'a> {
     pub linked: &'a [(Pos, Pos)],
     /// Extensions' decorations (`window/setDecorations`).
     pub ext: &'a [ExtDeco],
+    /// Git blame after the caret's line: (line, text).
+    pub blame: Option<(usize, &'a str)>,
 }
 
 /// A range an extension decorated, resolved to colors.
@@ -362,6 +364,8 @@ pub struct EditorState {
     pub merge: Option<Box<crate::workbench::merge_view::MergeState>>,
     /// Merge conflict actions drawn last frame: (rect, conflict, resolution), for clicks.
     pub conflict_actions: Vec<(Rect, crate::conflicts::Conflict, crate::conflicts::Resolution)>,
+    /// Where the git blame annotation was drawn last frame (it's clickable).
+    pub blame_rect: Option<Rect>,
 }
 
 /// Where a cursor goes after its edit, relative to the start of the inserted text.
@@ -463,7 +467,7 @@ fn closing_pair(c: char) -> Option<char> {
 
 impl EditorState {
     pub fn new(doc: usize) -> Self {
-        Self { doc, sel: Selection::default(), scroll_y: 0.0, scroll_x: 0.0, geom: Geom::default(), reveal: false, center: false, diff: None, welcome: false, extra: Vec::new(), word_occurrences: false, conflict_actions: Vec::new(), layout: Default::default(), folds: Default::default(), fold_controls: Vec::new(), sticky: Vec::new(), lens_hits: Vec::new(), swatch_hits: Vec::new(), peek: None, markdown: None, image: None, search: None, merge: None, preview: false }
+        Self { doc, sel: Selection::default(), scroll_y: 0.0, scroll_x: 0.0, geom: Geom::default(), reveal: false, center: false, diff: None, welcome: false, extra: Vec::new(), word_occurrences: false, conflict_actions: Vec::new(), blame_rect: None, layout: Default::default(), folds: Default::default(), fold_controls: Vec::new(), sticky: Vec::new(), lens_hits: Vec::new(), swatch_hits: Vec::new(), peek: None, markdown: None, image: None, search: None, merge: None, preview: false }
     }
 
     /// Diff tabs, previews and the Welcome page aren't text editors.
@@ -1945,6 +1949,28 @@ impl EditorState {
             c.push_clip(badge);
             c.text(badge.x + 5.0, y, msg, &st);
             c.pop_clip();
+        }
+
+        // Git blame after the caret's line (not where a test message is).
+        self.blame_rect = None;
+        if let Some((line, text)) = deco.blame.filter(|(l, _)| *l >= first && *l < last && !deco.test_messages.iter().any(|(m, _)| m == l)) {
+            let len = text_of(line).chars().count();
+            if let Some(i) = rows.iter().position(|vr| vr.line == line && !vr.zone && !vr.peek && vr.end == len) {
+                let y = y_row(first_row + i);
+                let x = text_x + (cols_in_row(&rows[i], len, len).0 + 3) as f32 * cw;
+                let st = style.color(theme.color("git.blame.editorDecorationForeground"));
+                let w = c.measure(text, &st).min((text_rect.right() - x).max(0.0));
+                if w > 2.0 * cw {
+                    let r = Rect::new(x, y, w, lh);
+                    c.push_clip(r);
+                    c.text(x, y, text, &st);
+                    c.pop_clip();
+                    if hover.is_some_and(|(hx, hy)| r.contains(hx, hy)) {
+                        c.fill(Rect::new(x, y + lh - 3.0, w, 1.0), st.color);
+                    }
+                    self.blame_rect = Some(r);
+                }
+            }
         }
 
         // Diagnostics: wavy underlines, like the standard squiggles.

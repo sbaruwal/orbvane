@@ -863,6 +863,13 @@ fn builtin() -> Vec<Setting> {
                 description: "Configure whether you receive automatic updates. The updates are fetched from Orbvane's releases on GitHub. With updates on, Orbvane checks shortly after starting and every 12 hours, downloads a newer version in the background and offers to restart into it.",
             },
             Setting {
+                key: "git.blame.editorDecoration.enabled",
+                default: "true",
+                kind: Kind::Bool,
+                section: Section::Git,
+                description: "Controls whether to show blame information (who last changed the line, when, and the commit's summary) after the line the cursor is on. Click it to see what that commit changed.",
+            },
+            Setting {
                 key: "git.autofetch",
                 default: "false",
                 kind: Kind::Bool,

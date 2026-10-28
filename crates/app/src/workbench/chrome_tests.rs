@@ -369,3 +369,62 @@ fn accessibility_tree_and_text() {
     assert_eq!(wb.a11y_note(), "Done.");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Git blame after the caret's line: the commit's author, age and summary, "uncommitted" for
+/// unsaved lines, and a click opens what the commit changed.
+#[test]
+fn blame_after_the_caret_line() {
+    let dir = std::env::temp_dir().join(format!("orbvane-blame-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let dir = dir.canonicalize().unwrap();
+    let git = |args: &[&str]| assert!(std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().unwrap().status.success());
+    git(&["init", "-q", "-b", "main"]);
+    git(&["config", "user.email", "test@example.com"]);
+    git(&["config", "user.name", "Ann"]);
+    std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+    git(&["add", "a.txt"]);
+    git(&["commit", "-q", "-m", "Count to two"]);
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[dir.join("a.txt")], std::sync::Arc::new(|| {}));
+    let Ok(mut r) = render::Renderer::offscreen((1100, 700), 1.0) else { return }; // no GPU here
+    wb.focus = Focus::Editor;
+    let until = |wb: &mut Workbench, r: &mut render::Renderer, what: &str, done: &dyn Fn(&Workbench) -> bool| {
+        let start = std::time::Instant::now();
+        loop {
+            draw(wb, r);
+            if done(wb) {
+                return;
+            }
+            assert!(start.elapsed() < std::time::Duration::from_secs(15), "timed out waiting for {what}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    };
+    let label = |wb: &Workbench| wb.a11y.iter().find(|n| n.label.starts_with("Blame: ")).map(|n| n.label.clone());
+    until(&mut wb, &mut r, "the blame", &|wb| label(wb).is_some());
+    assert_eq!(label(&wb).unwrap(), "Blame: Ann, just now • Count to two");
+
+    // A new line, not saved: not committed yet (asked again once typing pauses).
+    let doc = wb.groups[wb.active_group].tabs[0].doc;
+    let start = text::Pos::new(0, 0);
+    wb.edit_doc(doc, vec![(start, start, "zero\n".into())], false);
+    {
+        let g = wb.active_group;
+        let ed = &mut wb.groups[g].tabs[0];
+        ed.set_selection(text::Selection::caret(text::Pos::new(0, 1)));
+    }
+    until(&mut wb, &mut r, "the new line's blame", &|wb| label(wb).is_some_and(|l| l.contains("Uncommitted")));
+    {
+        let g = wb.active_group;
+        wb.groups[g].tabs[0].set_selection(text::Selection::caret(text::Pos::new(2, 0)));
+    }
+    draw(&mut wb, &mut r);
+    assert_eq!(label(&wb).unwrap(), "Blame: Ann, just now • Count to two");
+
+    // Clicking it opens the commit's changes to the file.
+    let g = wb.active_group;
+    click(&mut wb, &mut r, Hit::Blame(g));
+    assert!(wb.active_editor().is_some_and(|e| e.diff.is_some()));
+    let _ = std::fs::remove_dir_all(&dir);
+}

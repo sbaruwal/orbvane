@@ -162,6 +162,8 @@ pub struct Config {
     pub wrapping_indent: crate::layout::WrapIndent,
     /// Seconds between automatic fetches (`git.autofetch`), if enabled.
     pub git_autofetch_secs: Option<u64>,
+    /// Git blame after the caret's line (`git.blame.editorDecoration.enabled`).
+    pub blame: bool,
 }
 
 impl Default for Config {
@@ -195,6 +197,7 @@ impl Default for Config {
             terminal_font_size: 12.0,
             terminal_line_height: 16.0,
             git_autofetch_secs: None,
+            blame: true,
             folding: true,
             bracket_colors: true,
             match_brackets: true,
@@ -300,6 +303,7 @@ impl Config {
             // Line height 1 gives the cell height we've always used (4/3 of the font size).
             terminal_line_height: (terminal_font_size * 4.0 / 3.0 * s.number("terminal.integrated.lineHeight") as f32).round(),
             git_autofetch_secs: s.bool("git.autofetch").then(|| s.number("git.autofetchPeriod") as u64),
+            blame: s.bool("git.blame.editorDecoration.enabled"),
             folding: s.bool("editor.folding"),
             bracket_colors: s.bool("editor.bracketPairColorization.enabled"),
             match_brackets: s.string("editor.matchBrackets") != "never",

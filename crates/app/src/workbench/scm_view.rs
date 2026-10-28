@@ -198,6 +198,7 @@ impl Workbench {
         }
         self.git_tick();
         self.timeline_tick();
+        self.blame_tick();
         self.scm_graph_tick();
         // Parked repositories keep their status fresh (for the Explorer's colors and the
         // Repositories list); anything else they report waits until they're shown.
@@ -221,6 +222,7 @@ impl Workbench {
                 Event::Done { op, output } => self.git_done(op, output),
                 Event::Failed { op, error } => self.git_failed(op, error),
                 Event::FileLog(path, entries) => self.timeline_arrived(path, entries),
+                Event::Blame { path, tag, blame } => self.blame_arrived(path, tag, blame),
                 Event::Graph(commits) => self.scm_graph_arrived(commits),
                 Event::CommitFiles(hash, files) => self.commit_files_arrived(hash, files),
                 Event::HeadContents(path, text) => {
@@ -236,6 +238,7 @@ impl Workbench {
         }
         if status_changed {
             self.refresh_timeline();
+            self.refresh_blame();
             self.refresh_scm_graph();
             // A new HEAD (commit, checkout, pull) invalidates the cached HEAD contents.
             let head = self.repo.as_ref().and_then(|r| r.status.head.clone());

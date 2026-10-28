@@ -81,6 +81,7 @@ mod tabs;
 mod terminal_view;
 mod testing_view;
 mod timeline;
+mod blame;
 mod updates;
 mod watching;
 mod workspaces;
@@ -236,6 +237,8 @@ enum Hit {
     ScmGraphSash,
     TimelineBody,
     TimelineRow(usize),
+    /// Group `g`'s git blame annotation.
+    Blame(usize),
     OpenFolderButton,
     Tab(usize, usize),
     TabClose(usize, usize),
@@ -651,6 +654,7 @@ pub struct Workbench {
     /// When to refresh git status because files changed.
     git_nudge: Option<Instant>,
     timeline: timeline::Timeline,
+    blame: blame::BlameState,
     scm_graph: scm_graph::ScmGraph,
     /// The Explorer's sections as laid out last frame.
     sections: sections::SectionRects,
@@ -797,6 +801,7 @@ impl Workbench {
             watching: Vec::new(),
             git_nudge: None,
             timeline: Default::default(),
+            blame: Default::default(),
             scm_graph: Default::default(),
             sections: Default::default(),
             outline_menu_at: (0.0, 0.0),
@@ -886,7 +891,7 @@ impl Workbench {
             self.caret_epoch + CARET_BLINK * n as u32
         });
         let status = self.status_message.as_ref().filter(|_| self.chord.is_none()).map(|(_, t)| *t + Duration::from_secs(3));
-        [blink, self.hover_deadline(), self.search_deadline(), self.scm_deadline(), self.auto_save_deadline(), status, self.git_deadline(), self.terminal_deadline(), self.format_save_deadline(), self.lightbulb_deadline(), self.outline_deadline(), self.symbol_search_deadline(), self.inlay_deadline(), self.semantic_deadline(), self.folding_deadline(), self.watch_deadline(), self.debug_deadline(), self.lens_deadline(), self.testing_deadline(), self.search_editor_deadline(), self.linked_deadline(), self.color_deadline(), self.toasts_deadline(), self.marketplace_deadline(), self.updates_deadline(), self.idle_servers_deadline(), self.assistant_deadline(), self.mcp_deadline(), self.a11y_out.deadline()]
+        [blink, self.hover_deadline(), self.search_deadline(), self.scm_deadline(), self.auto_save_deadline(), status, self.git_deadline(), self.terminal_deadline(), self.format_save_deadline(), self.lightbulb_deadline(), self.outline_deadline(), self.symbol_search_deadline(), self.inlay_deadline(), self.semantic_deadline(), self.folding_deadline(), self.watch_deadline(), self.debug_deadline(), self.lens_deadline(), self.testing_deadline(), self.search_editor_deadline(), self.linked_deadline(), self.color_deadline(), self.toasts_deadline(), self.marketplace_deadline(), self.updates_deadline(), self.idle_servers_deadline(), self.assistant_deadline(), self.mcp_deadline(), self.a11y_out.deadline(), self.blame_deadline()]
             .into_iter()
             .flatten()
             .min()
@@ -903,6 +908,7 @@ impl Workbench {
         self.colors.forget_docs();
         self.ext_decorations.forget_docs();
         self.git.forget_docs();
+        self.blame.forget_docs();
         self.auto_save.forget_docs();
         self.format_saves.clear();
         // Popups and requests in flight that point at a document.
@@ -1358,6 +1364,10 @@ impl Workbench {
                 let on = config::get().word_wrap != config::WordWrap::Off;
                 let value = if on { "off" } else { "on" };
                 self.update_setting(settings::Scope::User, "editor.wordWrap", Some(serde_json::Value::String(value.into())));
+            }
+            Command::GitToggleBlame => {
+                let on = config::get().blame;
+                self.update_setting(settings::Scope::User, "git.blame.editorDecoration.enabled", Some(serde_json::Value::Bool(!on)));
             }
             Command::ToggleMinimap => {
                 let on = config::get().minimap;
@@ -2314,6 +2324,7 @@ impl Workbench {
             Hit::ScmGraphSash => self.drag = Some(Drag::ScmGraphSash),
             Hit::TimelineBody => {}
             Hit::TimelineRow(i) => self.open_timeline_entry(i),
+            Hit::Blame(g) => self.open_blame_commit(g),
             Hit::SignatureHelp => {}
             Hit::SignatureCycle(next) => self.cycle_signature(if next { 1 } else { -1 }),
             Hit::BreadcrumbSymbol(g, i) => self.breadcrumb_menu(g, i),
@@ -3554,6 +3565,7 @@ impl Workbench {
             gr.tabs.get(gr.active).and_then(|ed| self.docs[ed.doc].as_ref()).map(|d| self.squiggles_for(d)).unwrap_or_default()
         };
         let ext_decos = self.groups[g].tabs.get(self.groups[g].active).map(|ed| self.ext_decorations_for(ed.doc)).unwrap_or_default();
+        let blame = self.blame_annotation(g);
         let theme = &self.theme;
         let gr = &mut self.groups[g];
         let Some(ed) = gr.tabs.get_mut(gr.active) else { return };
@@ -3569,9 +3581,9 @@ impl Workbench {
         }
         c.push_clip(editor_rect);
         let deco = if gr.find.visible {
-            crate::editor::Decorations { squiggles: &squiggles, matches: &gr.find.matches, current_match: gr.find.current, git: &git, conflicts: &conflicts, lightbulb, snippet: &snippet, breakpoints: &breakpoints, stack_frame, hide_line_numbers: zen, tests: &tests, test_messages: &test_messages, search_results: &search_results, merge: &merge_marks, linked: &linked, ext: &ext_decos }
+            crate::editor::Decorations { squiggles: &squiggles, matches: &gr.find.matches, current_match: gr.find.current, git: &git, conflicts: &conflicts, lightbulb, snippet: &snippet, breakpoints: &breakpoints, stack_frame, hide_line_numbers: zen, tests: &tests, test_messages: &test_messages, search_results: &search_results, merge: &merge_marks, linked: &linked, ext: &ext_decos, blame: blame.as_ref().map(|(l, t)| (*l, t.as_str())) }
         } else {
-            crate::editor::Decorations { squiggles: &squiggles, git: &git, conflicts: &conflicts, lightbulb, snippet: &snippet, breakpoints: &breakpoints, stack_frame, hide_line_numbers: zen, tests: &tests, test_messages: &test_messages, search_results: &search_results, merge: &merge_marks, linked: &linked, ext: &ext_decos, ..Default::default() }
+            crate::editor::Decorations { squiggles: &squiggles, git: &git, conflicts: &conflicts, lightbulb, snippet: &snippet, breakpoints: &breakpoints, stack_frame, hide_line_numbers: zen, tests: &tests, test_messages: &test_messages, search_results: &search_results, merge: &merge_marks, linked: &linked, ext: &ext_decos, blame: blame.as_ref().map(|(l, t)| (*l, t.as_str())), ..Default::default() }
         };
         ed.draw(c, theme, doc, editor_rect, focused, caret_on, minimap, hover, dragging, &deco);
         c.pop_clip();
@@ -3581,6 +3593,7 @@ impl Workbench {
         let sticky: Vec<(Rect, usize)> = ed.sticky.clone();
         let lenses: Vec<(Rect, usize)> = ed.lens_hits.clone();
         let swatches: Vec<(Rect, text::Pos)> = ed.swatch_hits.clone();
+        let blame_rect = ed.blame_rect;
         self.a11y_text_area(g, geom.text);
         self.hits.push((editor_rect, Hit::Editor(g)));
         self.hits.extend(actions.into_iter().enumerate().map(|(i, r)| (r, Hit::ConflictAction(g, i))));
@@ -3589,6 +3602,10 @@ impl Workbench {
         self.hits.extend(lenses.into_iter().map(|(r, i)| (r, Hit::CodeLens(g, i))));
         self.hits.extend(swatches.into_iter().map(|(r, pos)| (r, Hit::ColorSwatch(g, pos))));
         self.hits.extend(sticky.into_iter().map(|(r, line)| (r, Hit::StickyLine(g, line))));
+        if let (Some(r), Some((_, text))) = (blame_rect, &blame) {
+            self.hits.push((r.intersect(&editor_rect), Hit::Blame(g)));
+            self.a11y_name(Hit::Blame(g), a11y::Role::Button, format!("Blame: {text}"), false);
+        }
         if let Some(r) = geom.lightbulb {
             self.hits.push((r, Hit::Lightbulb(g)));
         }

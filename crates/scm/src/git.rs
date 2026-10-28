@@ -471,6 +471,109 @@ fn parse_log(text: &str) -> Vec<LogEntry> {
         .collect()
 }
 
+/// Who last changed each line of a file.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Blame {
+    pub commits: Vec<BlameCommit>,
+    /// For each line (0-based): an index into `commits`.
+    pub lines: Vec<usize>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BlameCommit {
+    pub hash: String,
+    pub author: String,
+    /// Without the angle brackets.
+    pub email: String,
+    /// Author time, seconds since the epoch.
+    pub time: i64,
+    pub summary: String,
+}
+
+impl BlameCommit {
+    /// Lines changed in the working tree (or the editor) and not committed.
+    pub fn uncommitted(&self) -> bool {
+        self.hash.bytes().all(|b| b == b'0')
+    }
+}
+
+/// Blames `path`; with `contents`, those lines (the editor's text, unsaved changes included)
+/// instead of the file on disk. None when git can't (an untracked file, no commits).
+pub fn blame(root: &Path, path: &Path, contents: Option<&str>) -> Option<Blame> {
+    use std::io::Write;
+    let rel = path.strip_prefix(root).ok()?.to_string_lossy().replace('\\', "/");
+    let mut args = vec!["blame", "--porcelain"];
+    if contents.is_some() {
+        args.extend(["--contents", "-"]);
+    }
+    args.extend(["--", &rel]);
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(&args)
+        .env("LC_ALL", "C")
+        .env("GIT_PAGER", "cat")
+        .stdin(if contents.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() })
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // Written from a thread: git may start answering before it has read everything.
+    let writer = contents.map(|text| {
+        let mut stdin = child.stdin.take().unwrap();
+        let text = text.to_string();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(text.as_bytes());
+        })
+    });
+    let out = child.wait_with_output().ok()?;
+    if let Some(w) = writer {
+        let _ = w.join();
+    }
+    out.status.success().then(|| parse_blame(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// `git blame --porcelain`: a header per line ("<hash> <orig> <final> [<count>]"), the commit's
+/// fields the first time it appears, then the line itself after a tab.
+fn parse_blame(text: &str) -> Blame {
+    let mut blame = Blame::default();
+    let mut index: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    let mut current: Option<(usize, usize)> = None; // (commit, final line)
+    for line in text.lines() {
+        if line.starts_with('\t') {
+            if let Some((commit, at)) = current.take() {
+                if blame.lines.len() <= at {
+                    blame.lines.resize(at + 1, commit);
+                }
+                blame.lines[at] = commit;
+            }
+            continue;
+        }
+        if current.is_none() {
+            let mut f = line.split(' ');
+            let (Some(hash), Some(_), Some(at)) = (f.next(), f.next(), f.next().and_then(|n| n.parse::<usize>().ok())) else { continue };
+            let next = blame.commits.len();
+            let commit = *index.entry(hash.to_string()).or_insert(next);
+            if commit == next {
+                blame.commits.push(BlameCommit { hash: hash.to_string(), ..BlameCommit::default() });
+            }
+            current = Some((commit, at.saturating_sub(1)));
+            continue;
+        }
+        let Some((commit, _)) = current else { continue };
+        let c = &mut blame.commits[commit];
+        let (key, value) = line.split_once(' ').unwrap_or((line, ""));
+        match key {
+            "author" => c.author = value.to_string(),
+            "author-mail" => c.email = value.trim_start_matches('<').trim_end_matches('>').to_string(),
+            "author-time" => c.time = value.parse().unwrap_or(0),
+            "summary" => c.summary = value.to_string(),
+            _ => {}
+        }
+    }
+    blame
+}
+
 /// HEAD's history, with its upstream's (incoming commits), newest first, at most `limit`.
 pub fn graph_log(root: &Path, limit: usize) -> Vec<crate::graph::GraphCommit> {
     let n = format!("-n{limit}");
