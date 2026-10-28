@@ -531,6 +531,27 @@ fn builtin() -> Vec<Setting> {
                 description: "Controls auto save of editors that have unsaved changes.",
             },
             Setting {
+                key: "workbench.localHistory.enabled",
+                default: "true",
+                kind: Kind::Bool,
+                section: Section::Workbench,
+                description: "Controls whether local file history is enabled. When enabled, the file contents of an editor that is saved will be stored to a backup location to be able to restore or review the contents later. The Timeline shows them.",
+            },
+            Setting {
+                key: "workbench.localHistory.maxFileSize",
+                default: "256",
+                kind: INT(1.0, 1e9),
+                section: Section::Workbench,
+                description: "Controls the maximum size of a file (in KB) to be considered for local file history. Files that are larger will not be added to the local file history.",
+            },
+            Setting {
+                key: "workbench.localHistory.maxFileEntries",
+                default: "50",
+                kind: INT(1.0, 1e9),
+                section: Section::Workbench,
+                description: "Controls the maximum number of local file history entries per file. When the number of local file history entries exceeds this number for a file, the oldest entries will be discarded.",
+            },
+            Setting {
                 key: "files.autoSaveDelay",
                 default: "1000",
                 kind: INT(0.0, 1e9),

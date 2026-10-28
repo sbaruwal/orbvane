@@ -26,6 +26,7 @@ mod json_schemas;
 mod keymap;
 mod languages;
 mod layout;
+mod local_history;
 mod markdown;
 mod merge;
 mod search_editor;

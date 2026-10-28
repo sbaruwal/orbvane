@@ -51,6 +51,8 @@ pub(crate) enum PopupAction {
     Agent(super::AgentAction),
     /// The status bar's server menu.
     Server(crate::servers::ServerKey, super::language_servers::ServerAction),
+    /// A Timeline row's menu entry.
+    Timeline(usize, super::timeline::TimelineAction),
     /// The entry is a submenu with these entries.
     Submenu(Vec<(PopupItem, PopupAction)>),
 }
@@ -281,6 +283,7 @@ impl Workbench {
         match action {
             PopupAction::None | PopupAction::Submenu(_) => {}
             PopupAction::Run(cmd) => self.run(cmd),
+            PopupAction::Timeline(i, action) => self.timeline_action(i, action),
             PopupAction::CodeAction(i) => self.run_code_action(i),
             PopupAction::GotoHere(pos) => self.goto_here(pos),
             PopupAction::ShowView(v) => self.show_view(v),
@@ -412,8 +415,10 @@ impl Workbench {
         true
     }
 
-    /// Reacts to a saved file: settings files are re-read, git status refreshed.
+    /// Reacts to a saved file: settings files are re-read, git status refreshed, a copy kept in
+    /// the local history.
     pub(super) fn after_save(&mut self, path: &Path) {
+        self.keep_local_copy(path);
         if [Scope::User, Scope::Workspace].iter().any(|s| self.settings.path(*s) == Some(path)) {
             self.reload_settings();
         }

@@ -428,3 +428,51 @@ fn blame_after_the_caret_line() {
     assert!(wb.active_editor().is_some_and(|e| e.diff.is_some()));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Local history: each save keeps a copy, shown in the Timeline; clicking one compares it with
+/// the file, and its menu's Restore Contents puts it back (an undoable edit, saved).
+#[test]
+fn local_history_in_the_timeline() {
+    let dir = std::env::temp_dir().join(format!("orbvane-local-history-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("notes.txt");
+    std::fs::write(&file, "first\n").unwrap();
+    // SAFETY: every test that reads this wants the same scratch user data folder.
+    unsafe { std::env::set_var("ORBVANE_USER_DATA", std::env::temp_dir().join("orbvane-test-user")) };
+    let mut wb = Workbench::new(Some(dir.clone()), &[file.clone()], std::sync::Arc::new(|| {}));
+    let Ok(mut r) = render::Renderer::offscreen((1100, 700), 1.0) else { return }; // no GPU here
+    wb.run(Command::TimelineFocus);
+    draw(&mut wb, &mut r);
+    let doc = wb.groups[wb.active_group].tabs[0].doc;
+    let rows = |wb: &Workbench| wb.hits.iter().filter(|(_, h)| matches!(h, Hit::TimelineRow(_))).count();
+    assert_eq!(rows(&wb), 0);
+
+    // Two saves, two copies (saving the same text again adds none).
+    for text in ["second\n", "third\n"] {
+        let end = wb.docs[doc].as_ref().unwrap().buffer.pos_of(wb.docs[doc].as_ref().unwrap().buffer.len_chars());
+        wb.edit_doc(doc, vec![(text::Pos::new(0, 0), end, text.into())], false);
+        assert!(wb.save_doc(doc));
+    }
+    assert!(wb.save_doc(doc));
+    draw(&mut wb, &mut r);
+    assert_eq!(rows(&wb), 2);
+    let root = crate::local_history::root();
+    let copies = crate::local_history::entries(&root, &file);
+    assert_eq!(std::fs::read_to_string(crate::local_history::file_of(&root, &file, &copies[1])).unwrap(), "second\n");
+
+    // The older copy (the second row) compared with the file.
+    wb.open_timeline_entry(1);
+    assert!(wb.active_editor().is_some_and(|e| e.diff.is_some()));
+    let g = wb.active_group;
+    let active = wb.groups[g].active;
+    wb.close_tab(g, active);
+
+    // Restored: the document and the file have it again, and that save is a new copy.
+    wb.timeline_action(1, super::timeline::TimelineAction::Restore);
+    assert_eq!(wb.docs[doc].as_ref().unwrap().buffer.text(), "second\n");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), "second\n");
+    assert_eq!(crate::local_history::entries(&root, &file).len(), 3);
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(crate::local_history::folder(&root, &file));
+}
