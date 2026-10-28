@@ -187,7 +187,7 @@ Built-in grammars: `rust`, `python`, `go`, `c`, `cpp`, `javascript`, `typescript
 </details>
 
 <details>
-<summary><b>Git</b>: source control, graph, merge editor and timeline</summary>
+<summary><b>Git</b>: source control, graph, blame, merge editor, timeline and local history</summary>
 
 <br>
 
@@ -198,7 +198,13 @@ Built-in grammars: `rust`, `python`, `go`, `c`, `cpp`, `javascript`, `typescript
   open in their own tabs.
 - **Merge conflicts** get Accept Current / Incoming / Both in the editor, or a three-way
   **merge editor**.
-- **Timeline** (secondary side bar) lists the commits that changed the active file.
+- **Blame:** the line the cursor is on ends with who last changed it, when, and the commit's
+  summary. Click it to see what that commit changed in the file. Turn it off with
+  `git.blame.editorDecoration.enabled` or **Git: Toggle Git Blame Editor Decoration**.
+- **Timeline** (secondary side bar) lists the commits that changed the active file, and its
+  **local history**: a copy kept each time you save, in or out of a git repository. Click a copy
+  to compare it with the file; right-click it to restore it (one undo step). Copies are kept in
+  Orbvane's user data folder, 50 per file (`workbench.localHistory.*`).
 - Credential prompts (passwords, passphrases, host keys) appear in the editor's own input box.
   git's credential helpers and ssh-agent are tried first.
 
