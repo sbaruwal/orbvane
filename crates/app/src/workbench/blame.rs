@@ -1,9 +1,10 @@
 //! Git blame in the editor: after the line the caret is on, who last changed it, how long ago
 //! and the commit's summary (`git.blame.editorDecoration.enabled`). Clicking it opens what that
 //! commit changed in the file. The active document is blamed with its own text (unsaved changes
-//! show as not committed yet) once typing pauses, and again when git's status changes.
+//! show as not committed yet) once typing pauses, and again when HEAD moves (a commit, a
+//! checkout), meanwhile showing the blame it had.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -22,6 +23,10 @@ pub(super) struct BlameState {
     asked: Option<(usize, u64)>,
     /// The active document's version, and since when (requests wait for a pause).
     seen: Option<(usize, u64, Instant)>,
+    /// Documents whose blame was made at an older HEAD (shown until the new one comes).
+    stale: HashSet<usize>,
+    /// The HEAD commit the blames were made at.
+    head: Option<String>,
 }
 
 impl BlameState {
@@ -29,6 +34,7 @@ impl BlameState {
         self.docs.clear();
         self.asked = None;
         self.seen = None;
+        self.stale.clear();
     }
 }
 
@@ -64,7 +70,8 @@ impl Workbench {
         }
         let Some((id, path, version)) = self.blame_target() else { return };
         let b = &mut self.blame;
-        if b.docs.get(&id).is_some_and(|(p, v, _)| *p == path && *v == version) || b.asked == Some((id, version)) {
+        let current = b.docs.get(&id).is_some_and(|(p, v, _)| *p == path && *v == version) && !b.stale.contains(&id);
+        if current || b.asked == Some((id, version)) {
             return;
         }
         if b.seen.is_none_or(|(i, v, _)| (i, v) != (id, version)) {
@@ -93,13 +100,16 @@ impl Workbench {
             return;
         };
         b.asked = None;
+        b.stale.remove(&id);
         b.docs.insert(id, (path, version, blame.map(Arc::new)));
     }
 
-    /// Git's status changed (a commit, a checkout): every blame may be out of date.
+    /// Git's status arrived: when HEAD moved (a commit, a checkout), every blame is asked again.
     pub(super) fn refresh_blame(&mut self) {
-        for entry in self.blame.docs.values_mut() {
-            entry.1 = u64::MAX;
+        let head = self.repo.as_ref().and_then(|r| r.status.head.clone());
+        if head != self.blame.head {
+            self.blame.head = head;
+            self.blame.stale.extend(self.blame.docs.keys().copied());
         }
     }
 
@@ -109,7 +119,7 @@ impl Workbench {
         }
         let (_, _, t) = self.blame.seen?;
         let (id, _, version) = self.blame_target()?;
-        let current = self.blame.docs.get(&id).is_some_and(|e| e.1 == version);
+        let current = self.blame.docs.get(&id).is_some_and(|e| e.1 == version) && !self.blame.stale.contains(&id);
         (!current && self.blame.asked.is_none()).then_some(t + PAUSE)
     }
 

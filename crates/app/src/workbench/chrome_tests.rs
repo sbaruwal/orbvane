@@ -419,8 +419,7 @@ fn blame_after_the_caret_line() {
         let g = wb.active_group;
         wb.groups[g].tabs[0].set_selection(text::Selection::caret(text::Pos::new(2, 0)));
     }
-    draw(&mut wb, &mut r);
-    assert_eq!(label(&wb).unwrap(), "Blame: Ann, just now • Count to two");
+    until(&mut wb, &mut r, "the old line's blame", &|wb| label(wb).as_deref() == Some("Blame: Ann, just now • Count to two"));
 
     // Clicking it opens the commit's changes to the file.
     let g = wb.active_group;
